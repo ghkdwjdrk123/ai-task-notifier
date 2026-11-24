@@ -1,0 +1,6 @@
+# 시험 서버가 만드는 키·구독·로그(절대 커밋하지 않음)
+spikes/webpush/data/
+data/
+*.jsonl
+node_modules/
+.DS_Store
