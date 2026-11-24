@@ -9,12 +9,12 @@
 
 ## 상태
 
-**설계와 0단계(핵심 연동) 검증까지 끝났고, 서비스 본체는 아직 없습니다.**
+**1단계(상태·API 서버)까지 끝났습니다.** 아직 실제 에이전트와 폰에 연결되지 않아 그대로는 쓸 수 없습니다(2단계에서 연결).
 
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | 0 | 에이전트 질문 왕복, 폰 Web Push 실기 검증 | 완료(일부 측정은 4단계로) |
-| 1 | 상태·API 서버(가짜 제공자로 검증) | 예정 |
+| 1 | 상태·API 서버(가짜 제공자로 검증) | 완료: 인수 테스트 T01~T10·T12·T13·T16~T20 자동화 |
 | 2 | Claude Code 한 세션 왕복 + PWA 화면 | 예정 |
 | 3 | Codex 연동, 동시 작업 | 예정 |
 | 4 | 외부 접속·알림 안정성 측정 | 예정 |
@@ -32,9 +32,63 @@
 
 | 경로 | 내용 |
 |---|---|
+| `src/service/` | 상태 계산·전이: 제공자 이벤트(`events.rs`), 답 접수·전달·반영 확인(`answers.rs`), 기기·등록(`devices.rs`), 푸시 대기열(`outbox.rs`), 스냅샷·상세(`snapshot.rs`) |
+| `src/api.rs` | 폰(PWA)용 HTTP API |
+| `src/provider.rs`, `src/push.rs` | 제공자 연결·푸시 발송 계약과 시험용 가짜 구현 |
+| `migrations/` | SQLite 스키마 |
+| `tests/` | 인수 테스트(`acceptance.rs`, 시험 이름의 tNN = 설계 문서 테스트 ID)와 API 시험 |
 | `docs/design.md` | 설계 문서(요구사항 F01~F14, 상태 모델, 인수 테스트, 0단계 결과) |
 | `spikes/claude-question/` | 0단계 검증 스크립트: 질문을 가로채 답을 넣는 최소 MCP 서버(`ask_mcp.py`), PreToolUse 훅(`hook_ask.py`) |
 | `spikes/webpush/` | 0단계 검증용 Web Push 서버(`server.mjs`, Node 내장 crypto로 RFC 8291·8292 직접 구현)와 자체 시험(`selftest.mjs`) |
+
+## 서비스 빌드·실행
+
+요구사항: Rust 1.88 이상(edition 2024).
+
+```bash
+cargo test
+```
+
+```bash
+cargo build --release
+```
+
+폰 등록 코드 발급(10분 유효, 한 번만 사용):
+
+```bash
+./target/release/notifier pair
+```
+
+서버 실행. 루프백에서만 듣고, 폰은 Tailscale Serve 같은 사설망 HTTPS로 들어옵니다. `--allowed-origin`에는 폰이 접속할 주소를 줍니다.
+
+```bash
+./target/release/notifier serve --allowed-origin https://<맥 이름>.<tailnet>.ts.net
+```
+
+기기 목록과 해제:
+
+```bash
+./target/release/notifier devices
+```
+
+```bash
+./target/release/notifier revoke <기기 ID>
+```
+
+DB는 기본으로 `~/.local/share/ai-task-notifier/notifier.db`(권한 600)에 생기며 `--db` 또는 `NOTIFIER_DB`로 바꿀 수 있습니다.
+
+### API(1단계)
+
+| 경로 | 내용 |
+|---|---|
+| `POST /v1/pairing/exchange` | `{code, name}` → 기기 쿠키(HttpOnly·Secure·SameSite=Lax) |
+| `GET /v1/snapshot` | 진행 수·결정 대기 수·세션·열린 결정·갱신 지연·스냅샷 버전 |
+| `GET /v1/decisions/{id}` | 질문·선택지·남은 상태·답할 수 있는지·마지막 제출 |
+| `POST /v1/decisions/{id}/answers` | `{submission_id, decision_version, answers}` → 202(접수) 또는 200(같은 제출 재전송) |
+| `GET /v1/decisions/{id}/answers/{submission_id}` | 제출 상태 |
+| `PUT`·`DELETE /v1/device/push-subscription` | 브라우저 `PushSubscription.toJSON()` 그대로 |
+
+쓰기 요청은 `Origin`이 `--allowed-origin` 중 하나여야 합니다. 오류는 `{error, message}` JSON입니다.
 
 ## 0단계 시험 코드 실행
 

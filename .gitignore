@@ -4,3 +4,6 @@ data/
 *.jsonl
 node_modules/
 .DS_Store
+
+# Rust 빌드 결과
+/target/
