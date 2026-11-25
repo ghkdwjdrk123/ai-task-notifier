@@ -2,6 +2,7 @@ package io.github.ghkdwjdrk123.notifier
 
 import android.app.Activity
 import android.content.Context
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -30,17 +31,25 @@ object Ui {
         gravity = Gravity.CENTER_VERTICAL
     }
 
+    private fun isDark(ctx: Context) =
+        (ctx.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+
+    /** 본문 글자색. 기기 테마 기본색(삼성은 회색빛)이 아니라 대비가 충분한 색을 직접 쓴다. */
+    fun primary(ctx: Context) = if (isDark(ctx)) Color.parseColor("#F3F4F6") else Color.parseColor("#111827")
+
+    fun secondary(ctx: Context) = if (isDark(ctx)) Color.parseColor("#9CA3AF") else Color.parseColor("#6B7280")
+
     fun text(ctx: Context, s: CharSequence, sizeSp: Float = 15f, bold: Boolean = false, muted: Boolean = false) =
         TextView(ctx).apply {
             text = s
             textSize = sizeSp
             if (bold) setTypeface(typeface, Typeface.BOLD)
-            if (muted) alpha = 0.65f
+            setTextColor(if (muted) secondary(ctx) else primary(ctx))
             setPadding(0, dp(ctx, 2), 0, dp(ctx, 2))
         }
 
     fun heading(ctx: Context, s: String) = text(ctx, s, 13f, bold = true, muted = true).apply {
-        setPadding(0, dp(ctx, 18), 0, dp(ctx, 6))
+        setPadding(0, dp(ctx, 22), 0, dp(ctx, 4))
         letterSpacing = 0.04f
     }
 
@@ -54,16 +63,27 @@ object Ui {
         }
     }
 
-    /** 버튼 여러 개를 같은 폭으로 한 줄에(사이 간격 10dp). */
-    fun buttonRow(ctx: Context, vararg buttons: Button) = row(ctx).apply {
+    /**
+     * 버튼 여러 개를 같은 폭으로 한 줄에(사이 간격 10dp).
+     * 위쪽 간격은 줄에 준다: 가운데 정렬 줄 안의 버튼에 위쪽 여백을 주면 버튼이 아래로 밀려 잘린다.
+     */
+    fun buttonRow(ctx: Context, vararg buttons: Button) = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(ctx, 10)
+        }
         buttons.forEachIndexed { i, b ->
             b.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                topMargin = dp(ctx, 10)
                 if (i > 0) marginStart = dp(ctx, 10)
             }
             addView(b)
         }
     }
+
+    /** 색 점이 붙은 한 줄 상태 표시(예: ● 연결됨). */
+    fun status(ctx: Context, label: String, dotColor: Int) = text(ctx, android.text.SpannableString("●  $label").apply {
+        setSpan(android.text.style.ForegroundColorSpan(dotColor), 0, 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+    }, 14f, muted = true)
 
     /**
      * 화면 틀: 얇은 머리글(뒤로 가기·제목) + 스크롤 본문.
@@ -86,7 +106,7 @@ object Ui {
                     layoutParams = LinearLayout.LayoutParams(dp(ctx, 48), dp(ctx, 48))
                 })
             }
-            addView(text(ctx, title, 20f, bold = true))
+            addView(text(ctx, title, 18f, bold = true))
         }
         val scroll = ScrollView(ctx).apply {
             addView(content)

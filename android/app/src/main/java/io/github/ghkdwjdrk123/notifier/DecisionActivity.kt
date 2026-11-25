@@ -103,9 +103,9 @@ class DecisionActivity : Activity() {
             val card = Ui.card(this)
             q.header?.let { card.addView(Ui.text(this, it, 12f, bold = true, muted = true)) }
             card.addView(Ui.text(this, q.text, 16f, bold = true))
-            val free = if (d.allowFreeText) EditText(this).apply { hint = "직접 입력(선택지 대신)" } else null
+            val free = if (d.allowFreeText) EditText(this).apply { setTextColor(Ui.primary(context)); setHintTextColor(Ui.secondary(context)); hint = "직접 입력(선택지 대신)" } else null
             if (q.multiSelect) {
-                val boxes = q.options.map { o -> CheckBox(this).apply { text = label(o) } }
+                val boxes = q.options.map { o -> CheckBox(this).apply { text = label(o); setTextColor(Ui.primary(this@DecisionActivity)) } }
                 boxes.forEach(card::addView)
                 readers += {
                     val picked = q.options.filterIndexed { i, _ -> boxes[i].isChecked }.map { it.label }
@@ -113,7 +113,7 @@ class DecisionActivity : Activity() {
                 }
             } else {
                 val group = RadioGroup(this)
-                q.options.forEachIndexed { i, o -> group.addView(RadioButton(this).apply { id = 1000 + i; text = label(o) }) }
+                q.options.forEachIndexed { i, o -> group.addView(RadioButton(this).apply { id = 1000 + i; text = label(o); setTextColor(Ui.primary(this@DecisionActivity)) }) }
                 card.addView(group)
                 readers += {
                     val typed = free?.text?.toString()?.trim().orEmpty()

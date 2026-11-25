@@ -55,16 +55,16 @@ class MainActivity : Activity() {
         body = null
         val col = Ui.column(this, top = 4)
         col.addView(Ui.text(this, "맥에서 notifier pair로 만든 코드를 넣으세요. 폰의 Tailscale이 켜져 있어야 합니다.", muted = true))
-        val url = EditText(this).apply {
+        val url = EditText(this).apply { setTextColor(Ui.primary(context)); setHintTextColor(Ui.secondary(context));
             hint = "https://<맥 이름>.<tailnet>.ts.net:8443"
             setText(prefs.serverUrl)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         }
-        val code = EditText(this).apply {
+        val code = EditText(this).apply { setTextColor(Ui.primary(context)); setHintTextColor(Ui.secondary(context));
             hint = "등록 코드(예: ABCDE-FGHJK)"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
         }
-        val name = EditText(this).apply {
+        val name = EditText(this).apply { setTextColor(Ui.primary(context)); setHintTextColor(Ui.secondary(context));
             hint = "이 기기 이름"
             setText(prefs.deviceName)
         }
@@ -120,7 +120,7 @@ class MainActivity : Activity() {
         col.removeAllViews()
         val snap = st.snapshot
         col.addView(Ui.text(this, if (snap == null) "—" else "진행 ${snap.running} · 결정 대기 ${snap.waitingDecisions}", 26f, bold = true))
-        col.addView(Ui.text(this, linkText(st), muted = true))
+        col.addView(Ui.status(this, linkText(st), linkColor(st)))
 
         if (st.link == Link.UNAUTHORIZED) {
             col.addView(Ui.button(this, "다시 등록") {
@@ -222,6 +222,12 @@ class MainActivity : Activity() {
 
     private fun openDecision(id: String) {
         startActivity(Intent(this, DecisionActivity::class.java).putExtra(DecisionActivity.EXTRA_ID, id))
+    }
+
+    private fun linkColor(st: StatusHub.State): Int = when {
+        st.link == Link.LIVE && st.snapshot?.degraded != true -> 0xFF22C55E.toInt() // 초록
+        st.link == Link.LIVE || st.link == Link.CONNECTING -> 0xFFF59E0B.toInt() // 주황
+        else -> 0xFFEF4444.toInt() // 빨강
     }
 
     private fun linkText(st: StatusHub.State): String = when (st.link) {
