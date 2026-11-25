@@ -12,7 +12,6 @@ import android.provider.Settings
 import android.text.InputType
 import android.widget.EditText
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
@@ -54,9 +53,7 @@ class MainActivity : Activity() {
 
     private fun showSetup(error: String?) {
         body = null
-        title = "맥 연결"
-        val col = Ui.column(this)
-        col.addView(Ui.text(this, "맥 연결", 22f, bold = true))
+        val col = Ui.column(this, top = 4)
         col.addView(Ui.text(this, "맥에서 notifier pair로 만든 코드를 넣으세요. 폰의 Tailscale이 켜져 있어야 합니다.", muted = true))
         val url = EditText(this).apply {
             hint = "https://<맥 이름>.<tailnet>.ts.net:8443"
@@ -100,7 +97,7 @@ class MainActivity : Activity() {
                 }
             }.start()
         })
-        setContentView(ScrollView(this).apply { addView(col) })
+        Ui.screen(this, "맥 연결", null, col)
     }
 
     private fun askNotificationPermission() {
@@ -112,10 +109,9 @@ class MainActivity : Activity() {
     // ---------- 대시보드 ----------
 
     private fun showDashboard() {
-        title = "AI 작업 알림"
-        val col = Ui.column(this)
+        val col = Ui.column(this, top = 4)
         body = col
-        setContentView(ScrollView(this).apply { addView(col) })
+        Ui.screen(this, "AI 작업 알림", null, col)
         renderDashboard(StatusHub.state)
     }
 
@@ -191,14 +187,17 @@ class MainActivity : Activity() {
                 startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
             })
         }
-        val row = Ui.row(this)
-        row.addView(Ui.button(this, "다시 연결") { StatusService.start(this, reconnect = true) })
-        row.addView(Ui.button(this, if (prefs.statusEnabled) "상시 알림 끄기" else "상시 알림 켜기") {
-            prefs.statusEnabled = !prefs.statusEnabled
-            if (prefs.statusEnabled) StatusService.start(this) else StatusService.stop(this)
-            renderDashboard(StatusHub.state)
-        })
-        col.addView(row)
+        col.addView(
+            Ui.buttonRow(
+                this,
+                Ui.button(this, "다시 연결") { StatusService.start(this, reconnect = true) },
+                Ui.button(this, if (prefs.statusEnabled) "상시 알림 끄기" else "상시 알림 켜기") {
+                    prefs.statusEnabled = !prefs.statusEnabled
+                    if (prefs.statusEnabled) StatusService.start(this) else StatusService.stop(this)
+                    renderDashboard(StatusHub.state)
+                },
+            ),
+        )
         col.addView(Ui.button(this, "이 폰 등록 해제") {
             AlertDialog.Builder(this)
                 .setMessage("이 폰의 연결 정보를 지우고 맥에서도 이 기기 등록을 해제합니다.")

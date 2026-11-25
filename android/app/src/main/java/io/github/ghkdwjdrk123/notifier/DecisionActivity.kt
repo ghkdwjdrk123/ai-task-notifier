@@ -9,7 +9,6 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
-import android.widget.ScrollView
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Duration
@@ -36,14 +35,13 @@ class DecisionActivity : Activity() {
         val token = prefs.token
         decisionId = intent.getStringExtra(EXTRA_ID) ?: return finish()
         if (token == null) {
-            setContentView(Ui.column(this).apply {
+            Ui.screen(this, "결정", ::finish, Ui.column(this, top = 4).apply {
                 addView(Ui.text(this@DecisionActivity, "연결 정보가 없어요. 앱을 열어 맥에 다시 등록해 주세요."))
             })
             return
         }
         savedInstanceState?.getString(KEY_SUB)?.let { submissionId = it }
         api = Api(prefs.serverUrl, token)
-        title = "결정"
         load(null)
     }
 
@@ -59,13 +57,13 @@ class DecisionActivity : Activity() {
 
     private fun load(message: String?) {
         if (isDestroyed) return
-        setContentView(Ui.column(this).apply { addView(Ui.text(this@DecisionActivity, "불러오는 중…", muted = true)) })
+        Ui.screen(this, "결정", ::finish, Ui.column(this, top = 4).apply { addView(Ui.text(this@DecisionActivity, "불러오는 중…", muted = true)) })
         Thread {
             val r = runCatching { api.decision(decisionId) }
             runOnUiThread {
                 r.onSuccess { render(it, message) }
                     .onFailure { e ->
-                        setContentView(Ui.column(this).apply {
+                        Ui.screen(this, "결정", ::finish, Ui.column(this, top = 4).apply {
                             addView(Ui.text(this@DecisionActivity, "불러오지 못했어요: ${e.message}"))
                             addView(Ui.button(this@DecisionActivity, "다시 시도") { load(null) })
                         })
@@ -75,7 +73,7 @@ class DecisionActivity : Activity() {
     }
 
     private fun render(d: DecisionDetail, message: String?) {
-        val col = Ui.column(this)
+        val col = Ui.column(this, top = 4)
         col.addView(Ui.text(this, d.summary.title, 20f, bold = true))
         val due = d.summary.deadlineAt?.let { "마감 ${clock.format(it)} · ${remaining(it)}" } ?: "마감 없음"
         col.addView(Ui.text(this, "${Names.provider(d.summary.provider)} · ${d.summary.sessionTitle} · $due", 13f, muted = true))
@@ -95,7 +93,7 @@ class DecisionActivity : Activity() {
             if (d.summary.state == "sending" || d.summary.state == "confirming") {
                 col.addView(Ui.button(this, "새로고침") { load(null) })
             }
-            setContentView(ScrollView(this).apply { addView(col) })
+            Ui.screen(this, "결정", ::finish, col)
             return
         }
 
@@ -149,7 +147,7 @@ class DecisionActivity : Activity() {
             submit(d, answers, status) { send.isEnabled = true }
         }
         col.addView(send)
-        setContentView(ScrollView(this).apply { addView(col) })
+        Ui.screen(this, "결정", ::finish, col)
     }
 
     private fun submit(d: DecisionDetail, answers: JSONObject, status: android.widget.TextView, reenable: () -> Unit) {
