@@ -4,7 +4,9 @@ use super::{
     DecisionRow, PUSH_MAX_TTL_MS, Service, ServiceError, bump_version, decision_select,
     finish_decision, new_id,
 };
-use crate::model::{CloseReason, DecisionState, EventKind, ProviderEvent, Question, SessionState};
+use crate::model::{
+    CloseReason, DecisionState, EventKind, ProviderEvent, Question, SessionState, UsageWindow,
+};
 use anyhow::Result;
 use sqlx::{Row, SqliteConnection};
 use std::collections::HashSet;
@@ -64,6 +66,70 @@ fn validate_questions(qs: &[Question], allow_free_text: bool) -> Result<(), Stri
         }
     }
     Ok(())
+}
+
+/// 사용량을 저장한다. 화면에 보이는 값(정수 %·상태·초기화 시각)이 바뀌었으면 true.
+async fn record_usage(
+    conn: &mut SqliteConnection,
+    provider: &str,
+    windows: &[UsageWindow],
+    now: i64,
+) -> Result<bool, ServiceError> {
+    if windows.is_empty() || windows.len() > 8 {
+        return Err(ServiceError::Invalid("사용량 창은 1~8개여야 합니다".into()));
+    }
+    let mut changed = false;
+    for w in windows {
+        let name_ok = !w.name.is_empty()
+            && w.name.len() <= 40
+            && w.name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        if !name_ok || !w.used_percent.is_finite() || !(0.0..=100.0).contains(&w.used_percent) {
+            return Err(ServiceError::Invalid(
+                "사용량 창 이름이나 비율(0~100)이 올바르지 않습니다".into(),
+            ));
+        }
+        if w.status.as_ref().is_some_and(|s| s.len() > 40) {
+            return Err(ServiceError::Invalid(
+                "사용량 상태 문자열이 너무 깁니다".into(),
+            ));
+        }
+        let old = sqlx::query(
+            "SELECT used_percent, resets_at, status FROM usage_windows WHERE provider = ? AND window = ?",
+        )
+        .bind(provider)
+        .bind(&w.name)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let differs = match &old {
+            None => true,
+            Some(r) => {
+                let p: f64 = r.try_get("used_percent")?;
+                let reset: Option<i64> = r.try_get("resets_at")?;
+                let status: Option<String> = r.try_get("status")?;
+                p.round() as i64 != w.used_percent.round() as i64
+                    || reset != w.resets_at
+                    || status != w.status
+            }
+        };
+        changed |= differs;
+        sqlx::query(
+            "INSERT INTO usage_windows (provider, window, used_percent, resets_at, status, observed_at) \
+             VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (provider, window) DO UPDATE SET \
+             used_percent = excluded.used_percent, resets_at = excluded.resets_at, \
+             status = excluded.status, observed_at = excluded.observed_at",
+        )
+        .bind(provider)
+        .bind(&w.name)
+        .bind(w.used_percent)
+        .bind(w.resets_at)
+        .bind(&w.status)
+        .bind(now)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(changed)
 }
 
 /// 일하는 세션의 상태: 열린 결정이 있으면 결정 대기(진행 수에서 빠짐), 없으면 진행 중.
@@ -191,13 +257,29 @@ impl Service {
         .execute(&mut *tx)
         .await?;
 
-        if matches!(ev.kind, EventKind::Heartbeat) {
-            tx.commit().await?;
-            return Ok(IngestResult {
-                duplicate: false,
-                changed: false,
-                new_decision: None,
-            });
+        // 세션과 무관한 이벤트: 하트비트·사용량
+        match &ev.kind {
+            EventKind::Heartbeat => {
+                tx.commit().await?;
+                return Ok(IngestResult {
+                    duplicate: false,
+                    changed: false,
+                    new_decision: None,
+                });
+            }
+            EventKind::UsageReported { windows } => {
+                let changed = record_usage(&mut tx, &ev.provider, windows, now).await?;
+                if changed {
+                    bump_version(&mut tx).await?;
+                }
+                tx.commit().await?;
+                return Ok(IngestResult {
+                    duplicate: false,
+                    changed,
+                    new_decision: None,
+                });
+            }
+            _ => {}
         }
 
         let (sid, state, created) = ensure_session(&mut tx, ev, now).await?;
@@ -205,7 +287,7 @@ impl Service {
         let mut new_decision = None;
 
         match &ev.kind {
-            EventKind::Heartbeat => unreachable!(),
+            EventKind::Heartbeat | EventKind::UsageReported { .. } => unreachable!(),
             EventKind::SessionStarted { title } => {
                 if !created && !title.trim().is_empty() {
                     let t: String = title.trim().chars().take(MAX_TITLE).collect();

@@ -1,8 +1,10 @@
-//! notifier 명령: 서비스 실행, 기기 등록 코드 발급, 기기 목록·해제.
+//! notifier 명령: 서비스 실행, 기기 등록 코드 발급, 기기 목록·해제, 이벤트 넣기.
 
 use ai_task_notifier::api::{self, ApiConfig, AppState};
 use ai_task_notifier::clock::SystemClock;
 use ai_task_notifier::db;
+use ai_task_notifier::model::ProviderEvent;
+use ai_task_notifier::provider::FakeProvider;
 use ai_task_notifier::service::Service;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -29,13 +31,18 @@ enum Cmd {
         /// 루프백 주소만 허용(폰은 Tailscale Serve 등으로 들어온다).
         #[arg(long, default_value = "127.0.0.1:8770")]
         listen: SocketAddr,
-        /// 쓰기 요청에 허용할 Origin. 여러 번 줄 수 있다.
-        #[arg(long = "allowed-origin", required = true)]
+        /// 브라우저 쓰기 요청에 허용할 Origin. 여러 번 줄 수 있다(Android 앱만 쓰면 생략).
+        #[arg(long = "allowed-origin")]
         allowed_origins: Vec<String>,
         /// 쿠키에서 Secure를 뺀다(HTTPS 없이 로컬에서 시험할 때만).
         #[arg(long)]
         insecure_cookie: bool,
+        /// 시험용: 이 이름의 제공자에 대한 답을 바로 '수락'으로 처리하는 가짜 제공자를 붙인다.
+        #[arg(long)]
+        demo_provider: Option<String>,
     },
+    /// 표준 입력의 제공자 이벤트(JSON 한 줄에 하나)를 넣는다. 훅·시험용.
+    Ingest,
     /// 폰 등록용 1회용 코드를 만든다.
     Pair {
         /// 유효 시간(분).
@@ -66,7 +73,18 @@ async fn main() -> Result<()> {
         None => default_db()?,
     };
     let pool = db::open(&db_path).await?;
-    let svc = Arc::new(Service::new(pool.clone(), Arc::new(SystemClock)));
+    let mut base = Service::new(pool.clone(), Arc::new(SystemClock));
+    if let Cmd::Serve {
+        demo_provider: Some(name),
+        ..
+    } = &cli.cmd
+    {
+        tracing::warn!(
+            "시험용 가짜 제공자 '{name}': 이 제공자의 답은 실제로 전달되지 않고 바로 수락됩니다"
+        );
+        base = base.with_provider(name, Arc::new(FakeProvider::new()));
+    }
+    let svc = Arc::new(base);
 
     match cli.cmd {
         Cmd::Pair { ttl_min } => {
@@ -75,6 +93,36 @@ async fn main() -> Result<()> {
             }
             let code = svc.create_pairing_code(ttl_min * 60_000).await?;
             println!("등록 코드: {code}  ({ttl_min}분 안에 폰에서 한 번만 쓸 수 있습니다)");
+        }
+        Cmd::Ingest => {
+            use std::io::BufRead;
+            let (mut ok, mut failed) = (0, 0);
+            for (i, line) in std::io::stdin().lock().lines().enumerate() {
+                let line = line?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let result = match serde_json::from_str::<ProviderEvent>(&line) {
+                    Ok(ev) => svc.ingest(&ev).await.map_err(|e| e.to_string()),
+                    Err(e) => Err(format!("JSON 해석 실패: {e}")),
+                };
+                match result {
+                    Ok(r) => {
+                        ok += 1;
+                        if let Some(id) = r.new_decision {
+                            println!("{}: 새 결정 {id}", i + 1);
+                        }
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        eprintln!("{}번째 줄: {e}", i + 1);
+                    }
+                }
+            }
+            println!("반영 {ok}건, 실패 {failed}건");
+            if failed > 0 {
+                bail!("일부 이벤트를 넣지 못했습니다");
+            }
         }
         Cmd::Devices => {
             for d in svc.list_devices().await? {
@@ -107,6 +155,7 @@ async fn main() -> Result<()> {
             listen,
             allowed_origins,
             insecure_cookie,
+            demo_provider: _,
         } => {
             if !listen.ip().is_loopback() {
                 bail!("루프백 주소에서만 실행합니다(폰 접속은 Tailscale Serve 등 사설망 HTTPS로)");
@@ -146,9 +195,9 @@ async fn serve(svc: Arc<Service>, listen: SocketAddr, cfg: ApiConfig) -> Result<
     }
     let wake = Arc::new(Notify::new());
     let worker = tokio::spawn(run_worker(svc.clone(), wake.clone()));
-    // 1단계에는 실제 제공자·푸시 발송기가 없다(2단계에서 연결). 대기열은 DB에 쌓인다.
+    // 실제 제공자 어댑터(Claude Code·Codex)는 아직 없다. --demo-provider로 붙인 시험용 제공자만 답을 받는다.
     tracing::info!(
-        "제공자·푸시 발송기 미연결(1단계): 답은 전달되지 않고 푸시는 대기열에만 기록됩니다"
+        "실제 제공자 어댑터 미연결: --demo-provider로 지정한 제공자 외의 답은 전달되지 않습니다"
     );
 
     let app = api::router(AppState {
@@ -160,11 +209,26 @@ async fn serve(svc: Arc<Service>, listen: SocketAddr, cfg: ApiConfig) -> Result<
         .await
         .with_context(|| format!("{listen}에 바인딩 실패"))?;
     tracing::info!("http://{listen} 에서 대기");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    // 종료 신호가 오면 새 연결을 받지 않고, 열린 스트림(폰)이 끊길 때까지 최대 3초만 기다린다
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = stop_rx.await;
+            })
+            .await
+    });
+    tokio::signal::ctrl_c()
+        .await
+        .context("종료 신호 대기 실패")?;
+    tracing::info!("종료 중…");
+    let _ = stop_tx.send(());
+    if tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .is_err()
+    {
+        tracing::warn!("열린 연결을 기다리지 않고 종료합니다");
+    }
     worker.abort();
     Ok(())
 }

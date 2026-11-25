@@ -182,6 +182,25 @@ pub enum EventKind {
     },
     /// 연결이 살아 있음(갱신 지연 판단용).
     Heartbeat,
+    /// 구독 사용량 보고(제공자 단위, 세션과 무관).
+    UsageReported {
+        windows: Vec<UsageWindow>,
+    },
+}
+
+/// 사용량 창 하나(예: Claude의 5시간 창).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageWindow {
+    /// 창 이름(예: "five_hour", "seven_day").
+    pub name: String,
+    /// 사용 비율 0~100.
+    pub used_percent: f64,
+    /// 다시 채워지는 시각(UTC 밀리초).
+    #[serde(default)]
+    pub resets_at: Option<i64>,
+    /// 제공자가 준 상태(예: "allowed", "allowed_warning", "rejected").
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 /// 원래 요청에 답을 넣은 결과.

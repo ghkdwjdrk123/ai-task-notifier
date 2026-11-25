@@ -1,20 +1,24 @@
 # ai-task-notifier
 
-맥에서 여러 개 돌려 둔 AI 코딩 에이전트(Claude Code, 이후 Codex) 세션의 **진행 상황**과 **내 답이 필요한 결정 요청**을 휴대폰(Android)으로 받아 보고, 폰에서 답하면 그 답이 원래 세션에 반영되어 작업이 이어지게 하는 개인용 도구입니다.
+맥에서 여러 개 돌려 둔 AI 코딩 에이전트(Claude Code, 이후 Codex) 세션의 **진행 상황·결정 요청·구독 사용량**을 휴대폰(Android) 알림창에 **상시 표시**하고, 누르면 결정 요청에 답해 원래 세션이 이어지게 하는 개인용 도구입니다. 푸시는 쓰지 않습니다.
 
 ```
-맥: 에이전트 세션 ──질문──▶ 알림 서비스 ──Web Push──▶ 폰(PWA): 잠금화면 알림
-                 ◀──답────            ◀──HTTPS(사설망)── 질문 상세에서 선택·전송
+맥: 에이전트 세션 ──질문·상태·사용량──▶ notifier 서버 ◀──실시간 스트림(SSE, Tailscale HTTPS)── 폰 앱: 상시 알림
+                 ◀─────────답──────────            ◀──────────답변───────────────────────── 누르면 답변 화면
 ```
+
+상시 알림 예: `진행 3 · 결정 대기 1` / `Claude 5시간 48% · 주간 4%  |  ChatGPT 5시간 12% · 주간 31%`
 
 ## 상태
 
-**1단계(상태·API 서버)까지 끝났습니다.** 아직 실제 에이전트와 폰에 연결되지 않아 그대로는 쓸 수 없습니다(2단계에서 연결).
+**서버와 Android 앱이 데모 제공자로 끝까지 동작합니다.** 실제 Claude Code·Codex 연결(어댑터)은 아직입니다.
 
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | 0 | 에이전트 질문 왕복, 폰 Web Push 실기 검증 | 완료(일부 측정은 4단계로) |
 | 1 | 상태·API 서버(가짜 제공자로 검증) | 완료: 인수 테스트 T01~T10·T12·T13·T16~T20 자동화 |
+| 2a | 상시 알림 Android 앱, 사용량·실시간 스트림·앱 인증 | 완료(실기 설치 전) |
+| 2b | Claude Code 어댑터(실제 세션·질문·사용량) | 예정 |
 | 2 | Claude Code 한 세션 왕복 + PWA 화면 | 예정 |
 | 3 | Codex 연동, 동시 작업 | 예정 |
 | 4 | 외부 접속·알림 안정성 측정 | 예정 |
@@ -35,6 +39,7 @@
 | `src/service/` | 상태 계산·전이: 제공자 이벤트(`events.rs`), 답 접수·전달·반영 확인(`answers.rs`), 기기·등록(`devices.rs`), 푸시 대기열(`outbox.rs`), 스냅샷·상세(`snapshot.rs`) |
 | `src/api.rs` | 폰(PWA)용 HTTP API |
 | `src/provider.rs`, `src/push.rs` | 제공자 연결·푸시 발송 계약과 시험용 가짜 구현 |
+| `android/` | Android 앱(Kotlin, 외부 라이브러리 없음): 상시 알림 서비스, 등록·대시보드·답변 화면 |
 | `migrations/` | SQLite 스키마 |
 | `tests/` | 인수 테스트(`acceptance.rs`, 시험 이름의 tNN = 설계 문서 테스트 ID)와 API 시험 |
 | `docs/design.md` | 설계 문서(요구사항 F01~F14, 상태 모델, 인수 테스트, 0단계 결과) |
@@ -77,7 +82,27 @@ cargo build --release
 
 DB는 기본으로 `~/.local/share/ai-task-notifier/notifier.db`(권한 600)에 생기며 `--db` 또는 `NOTIFIER_DB`로 바꿀 수 있습니다.
 
-### API(1단계)
+### Android 앱
+
+요구사항: JDK 17, Android SDK(platform 36, build-tools 36.1.0). `android/local.properties`에 `sdk.dir=<SDK 경로>`.
+
+```bash
+cd android && ./gradlew :app:assembleDebug
+```
+
+결과: `android/app/build/outputs/apk/debug/app-debug.apk`. 폰에 설치한 뒤 서버 주소(Tailscale Serve HTTPS)와 `notifier pair` 코드를 넣으면 상시 알림이 뜹니다. 화면이 꺼져도 연결을 유지하려면 앱 안내에 따라 배터리 최적화를 해제하세요.
+
+실제 어댑터 없이 시험하려면 데모 제공자로 서버를 띄우고 이벤트를 넣습니다.
+
+```bash
+./target/release/notifier serve --demo-provider demo
+```
+
+```bash
+echo '{"provider":"demo","session_id":"m1","event_id":"e1","type":"turn_started"}' | ./target/release/notifier ingest
+```
+
+### API
 
 | 경로 | 내용 |
 |---|---|
@@ -86,9 +111,13 @@ DB는 기본으로 `~/.local/share/ai-task-notifier/notifier.db`(권한 600)에 
 | `GET /v1/decisions/{id}` | 질문·선택지·남은 상태·답할 수 있는지·마지막 제출 |
 | `POST /v1/decisions/{id}/answers` | `{submission_id, decision_version, answers}` → 202(접수) 또는 200(같은 제출 재전송) |
 | `GET /v1/decisions/{id}/answers/{submission_id}` | 제출 상태 |
-| `PUT`·`DELETE /v1/device/push-subscription` | 브라우저 `PushSubscription.toJSON()` 그대로 |
+| `GET /v1/stream` | 실시간 스냅샷(SSE). 버전이 바뀌면 즉시, 아니어도 30초마다 |
+| `DELETE /v1/device` | 이 기기 등록 해제(토큰 무효) |
+| `PUT`·`DELETE /v1/device/push-subscription` | 브라우저 Web Push 구독(현재 앱은 쓰지 않음) |
 
-쓰기 요청은 `Origin`이 `--allowed-origin` 중 하나여야 합니다. 오류는 `{error, message}` JSON입니다.
+인증: 앱은 등록 때 `token_in_body: true`로 토큰을 받아 `Authorization: Bearer`로 보냅니다. 브라우저는 쿠키를 쓰며, 쿠키를 실은 쓰기 요청은 `Origin`이 `--allowed-origin` 중 하나여야 합니다. 오류는 `{error, message}` JSON입니다.
+
+제공자 이벤트(`notifier ingest` 입력, JSON 한 줄에 하나): `session_started`·`turn_started`·`turn_ended`·`subagent_activity`·`permission_requested`·`permission_resolved`·`decision_requested`·`decision_withdrawn`·`decision_answered_elsewhere`·`session_ended`·`heartbeat`·`usage_reported`. 형식은 `src/model.rs`의 `EventKind`.
 
 ## 0단계 시험 코드 실행
 

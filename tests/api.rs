@@ -114,12 +114,12 @@ async fn t01_pairing_over_http_and_origin_check() {
     let app = app(&h);
     let code = h.svc.create_pairing_code(600_000).await.unwrap();
     let body = json!({"code": code, "name": "갤럭시"});
-    // Origin 없거나 다른 출처면 거절
+    // 쿠키를 실은 쓰기 요청에 Origin이 없으면 거절(브라우저 교차 사이트 요청 차단)
     let (st, _, v) = call(
         &app,
         "POST",
         "/v1/pairing/exchange",
-        None,
+        Some(&"0".repeat(64)),
         None,
         Some(body.clone()),
     )
@@ -128,6 +128,7 @@ async fn t01_pairing_over_http_and_origin_check() {
         (st, v["error"].as_str()),
         (StatusCode::FORBIDDEN, Some("bad_origin"))
     );
+    // 다른 출처도 거절
     let (st, _, _) = call(
         &app,
         "POST",
@@ -294,4 +295,283 @@ async fn push_subscription_and_revocation() {
     h.svc.revoke_device(&dev.id).await.unwrap();
     let (st, _, _) = call(&app, "GET", "/v1/snapshot", Some(&token), None, None).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
+}
+
+// ---------- Android 앱 경로 ----------
+
+async fn call_bearer(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    token: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let b = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"));
+    let req = match body {
+        Some(v) => b
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(v.to_string()))
+            .unwrap(),
+        None => b.body(Body::empty()).unwrap(),
+    };
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn app_pairs_without_origin_and_uses_bearer() {
+    let h = harness().await;
+    let app = app(&h);
+    let code = h.svc.create_pairing_code(600_000).await.unwrap();
+    let body = json!({"code": code, "name": "S22", "token_in_body": true});
+    let (st, _, v) = call(&app, "POST", "/v1/pairing/exchange", None, None, Some(body)).await;
+    assert_eq!(st, StatusCode::OK);
+    let token = v["token"]
+        .as_str()
+        .expect("앱 등록은 본문으로 토큰을 받는다")
+        .to_string();
+    assert_eq!(token.len(), 64);
+
+    h.start(CLAUDE, "s1").await;
+    let id = h
+        .decide(
+            "s1",
+            "r1",
+            vec![q("어떻게 할까요?", &["중단", "건너뛰기"])],
+            None,
+        )
+        .await;
+    let (st, snap) = call_bearer(&app, "GET", "/v1/snapshot", &token, None).await;
+    assert_eq!(
+        (st, snap["waiting_decisions"].as_i64()),
+        (StatusCode::OK, Some(1))
+    );
+    // Bearer 쓰기 요청은 Origin 없이 된다
+    let version = snap["decisions"][0]["version"].as_i64().unwrap();
+    let answer = json!({"submission_id": "sub-app-0001", "decision_version": version,
+                        "answers": {"어떻게 할까요?": "중단"}});
+    let (st, s) = call_bearer(
+        &app,
+        "POST",
+        &format!("/v1/decisions/{id}/answers"),
+        &token,
+        Some(answer),
+    )
+    .await;
+    assert_eq!(
+        (st, s["state"].as_str()),
+        (StatusCode::ACCEPTED, Some("queued"))
+    );
+    // 틀린 토큰은 401
+    let (st, _) = call_bearer(&app, "GET", "/v1/snapshot", &"f".repeat(64), None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn browser_pairing_never_returns_token_in_body() {
+    let h = harness().await;
+    let app = app(&h);
+    let code = h.svc.create_pairing_code(600_000).await.unwrap();
+    let body = json!({"code": code, "name": "브라우저", "token_in_body": true});
+    let (st, _, v) = call(
+        &app,
+        "POST",
+        "/v1/pairing/exchange",
+        None,
+        Some(ORIGIN),
+        Some(body),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        v.get("token").is_none(),
+        "Origin이 있는 요청에는 본문 토큰 없음"
+    );
+}
+
+#[tokio::test]
+async fn usage_reported_appears_in_snapshot() {
+    use ai_task_notifier::model::{EventKind, UsageWindow};
+    let h = harness().await;
+    let app = app(&h);
+    let token = paired(&h, &app).await;
+    let w = |name: &str, p: f64| UsageWindow {
+        name: name.into(),
+        used_percent: p,
+        resets_at: Some(T0 + 3_600_000),
+        status: Some("allowed".into()),
+    };
+    let v0 = h.svc.snapshot_version().await.unwrap();
+    h.send(ev(
+        CLAUDE,
+        "-",
+        EventKind::UsageReported {
+            windows: vec![w("five_hour", 48.0), w("seven_day", 4.0)],
+        },
+    ))
+    .await;
+    let v1 = h.svc.snapshot_version().await.unwrap();
+    assert!(v1 > v0);
+    // 소수점 아래만 바뀌면 화면 버전을 올리지 않는다
+    h.send(ev(
+        CLAUDE,
+        "-",
+        EventKind::UsageReported {
+            windows: vec![w("five_hour", 48.2)],
+        },
+    ))
+    .await;
+    assert_eq!(h.svc.snapshot_version().await.unwrap(), v1);
+    let (_, _, snap) = call(&app, "GET", "/v1/snapshot", Some(&token), None, None).await;
+    let usage = snap["usage"].as_array().unwrap();
+    assert_eq!(usage.len(), 2);
+    assert_eq!(usage[0]["provider"], CLAUDE);
+    assert_eq!(usage[0]["window"], "five_hour");
+    assert_eq!(usage[0]["used_percent"].as_f64(), Some(48.2));
+    assert!(
+        snap["sessions"].as_array().unwrap().is_empty(),
+        "사용량 보고는 세션을 만들지 않음"
+    );
+    // 범위 밖 값은 거절
+    let bad = ev(
+        CLAUDE,
+        "-",
+        EventKind::UsageReported {
+            windows: vec![w("five_hour", 140.0)],
+        },
+    );
+    assert!(h.svc.ingest(&bad).await.is_err());
+}
+
+#[tokio::test]
+async fn stream_sends_snapshot_then_changes() {
+    let h = harness().await;
+    let app = app(&h);
+    let code = h.svc.create_pairing_code(600_000).await.unwrap();
+    let (_, _, v) = call(
+        &app,
+        "POST",
+        "/v1/pairing/exchange",
+        None,
+        None,
+        Some(json!({"code": code, "name": "S22", "token_in_body": true})),
+    )
+    .await;
+    let token = v["token"].as_str().unwrap().to_string();
+    let req = Request::builder()
+        .uri("/v1/stream")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get(header::CONTENT_TYPE).unwrap(),
+        "text/event-stream"
+    );
+    let mut body = res.into_body();
+    let mut text = String::new();
+    // 첫 스냅샷
+    while !text.contains("\n\n") {
+        let frame = body.frame().await.unwrap().unwrap();
+        if let Ok(d) = frame.into_data() {
+            text.push_str(std::str::from_utf8(&d).unwrap());
+        }
+    }
+    assert!(text.starts_with("event: snapshot"), "{text}");
+    assert!(text.contains("\"running\":0"));
+    // 상태가 바뀌면 다음 스냅샷이 온다
+    h.start(CLAUDE, "s1").await;
+    let mut next = String::new();
+    let got = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !next.contains("\"running\":1") {
+            let frame = body.frame().await.unwrap().unwrap();
+            if let Ok(d) = frame.into_data() {
+                next.push_str(std::str::from_utf8(&d).unwrap());
+            }
+        }
+    })
+    .await;
+    assert!(got.is_ok(), "변경 후 5초 안에 새 스냅샷: {next}");
+    // 기기를 해제하면 스트림이 닫힌다
+    let dev = h.svc.list_devices().await.unwrap().remove(0);
+    h.svc.revoke_device(&dev.id).await.unwrap();
+    h.start(CLAUDE, "s2").await;
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match body.frame().await {
+                None => break,
+                Some(Err(_)) => break,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "해제 후 스트림 종료");
+}
+
+#[tokio::test]
+async fn app_pairing_sets_no_cookie_and_can_revoke_itself() {
+    let h = harness().await;
+    let app = app(&h);
+    let code = h.svc.create_pairing_code(600_000).await.unwrap();
+    let (st, headers, v) = call(
+        &app,
+        "POST",
+        "/v1/pairing/exchange",
+        None,
+        None,
+        Some(json!({"code": code, "name": "S22", "token_in_body": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        headers.get(header::SET_COOKIE).is_none(),
+        "앱 등록에는 쿠키를 굽지 않음"
+    );
+    let token = v["token"].as_str().unwrap().to_string();
+    // 앱의 '등록 해제' → 서버에서도 토큰 무효
+    let (st, _) = call_bearer(&app, "DELETE", "/v1/device", &token, None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (st, _) = call_bearer(&app, "GET", "/v1/snapshot", &token, None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    // 해제된 토큰으로는 스트림도 못 연다
+    let (st, _) = call_bearer(&app, "GET", "/v1/stream", &token, None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn invalid_usage_reports_are_rejected() {
+    use ai_task_notifier::model::{EventKind, UsageWindow};
+    let h = harness().await;
+    let w = |name: &str, p: f64, status: Option<&str>| UsageWindow {
+        name: name.into(),
+        used_percent: p,
+        resets_at: None,
+        status: status.map(str::to_string),
+    };
+    let cases = vec![
+        vec![w("five_hour", f64::NAN, None)],
+        vec![w("five_hour", -1.0, None)],
+        vec![w("five hour", 10.0, None)],
+        vec![w("five_hour", 10.0, Some(&"x".repeat(41)))],
+        (0..9).map(|i| w(&format!("w{i}"), 1.0, None)).collect(),
+        vec![],
+    ];
+    for (i, windows) in cases.into_iter().enumerate() {
+        let r = h
+            .svc
+            .ingest(&ev(CLAUDE, "-", EventKind::UsageReported { windows }))
+            .await;
+        assert!(r.is_err(), "경우 {i}는 거절돼야 함");
+    }
+    assert!(h.svc.snapshot().await.unwrap().usage.is_empty());
 }

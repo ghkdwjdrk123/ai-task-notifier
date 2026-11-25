@@ -1,9 +1,12 @@
-//! 폰(PWA)용 HTTP API.
+//! 폰(Android 앱·브라우저)용 HTTP API.
 //!
 //! 보안
 //! - 서버는 루프백에서만 듣고, 폰은 Tailscale Serve 같은 사설망 HTTPS로 들어온다.
-//! - 인증은 기기 쿠키(HttpOnly, SameSite=Lax). 토큰 원문은 DB에 없다.
-//! - 쓰기 요청(POST·PUT·DELETE)은 Origin이 허용 목록에 있어야 한다(교차 사이트 요청 차단).
+//! - 인증: Android 앱은 `Authorization: Bearer <토큰>`, 브라우저는 기기 쿠키(HttpOnly, SameSite=Lax).
+//!   토큰 원문은 DB에 없다.
+//! - 쓰기 요청(POST·PUT·DELETE): Origin이 있으면 허용 목록에 있어야 한다. Origin이 없는 쓰기는
+//!   쿠키를 싣지 않은 경우(앱의 Bearer 요청·등록)만 받는다 — 브라우저는 쓰기 요청에 항상 Origin을
+//!   붙이므로 쿠키를 이용한 교차 사이트 요청은 막힌다.
 //! - 모든 응답은 `Cache-Control: no-store`.
 
 use crate::push::PushSubscription;
@@ -11,12 +14,17 @@ use crate::service::{DeviceView, Service, ServiceError, SubmitRequest};
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header, request::Parts};
 use axum::middleware::{self, Next};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
+use futures_util::Stream;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Notify;
+use tokio::time::Instant;
 
 pub const COOKIE: &str = "atn_device";
 const COOKIE_MAX_AGE_SECS: i64 = 90 * 24 * 3600;
@@ -42,9 +50,11 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/pairing/exchange", post(pairing_exchange))
         .route("/v1/snapshot", get(snapshot))
+        .route("/v1/stream", get(stream))
         .route("/v1/decisions/{id}", get(decision_detail))
         .route("/v1/decisions/{id}/answers", post(submit_answer))
         .route("/v1/decisions/{id}/answers/{sid}", get(get_submission))
+        .route("/v1/device", delete(revoke_self))
         .route(
             "/v1/device/push-subscription",
             put(put_push_subscription).delete(delete_push_subscription),
@@ -139,7 +149,12 @@ async fn guard(State(st): State<AppState>, req: Request, next: Next) -> Response
             .headers()
             .get(header::ORIGIN)
             .and_then(|v| v.to_str().ok());
-        let ok = origin.is_some_and(|o| st.cfg.allowed_origins.iter().any(|a| a == o));
+        let has_cookie = req.headers().contains_key(header::COOKIE);
+        let ok = match origin {
+            Some(o) => st.cfg.allowed_origins.iter().any(|a| a == o),
+            // 브라우저가 아닌 클라이언트(앱): 쿠키 인증이 아니면 Origin 없이 허용
+            None => !has_cookie,
+        };
         if !ok {
             let mut res = ApiError::new(
                 StatusCode::FORBIDDEN,
@@ -176,11 +191,24 @@ fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 /// 인증된 기기.
 pub struct AuthDevice(pub DeviceView);
 
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+}
+
+/// 요청의 기기 토큰: Bearer가 있으면 그것, 없으면 쿠키.
+fn device_token(headers: &HeaderMap) -> Option<&str> {
+    bearer_token(headers).or_else(|| cookie_value(headers, COOKIE))
+}
+
 impl FromRequestParts<AppState> for AuthDevice {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, st: &AppState) -> Result<Self, Self::Rejection> {
-        let token = cookie_value(&parts.headers, COOKIE).ok_or_else(ApiError::unauthorized)?;
+        let token = device_token(&parts.headers).ok_or_else(ApiError::unauthorized)?;
         st.svc
             .authenticate(token)
             .await?
@@ -195,32 +223,99 @@ impl FromRequestParts<AppState> for AuthDevice {
 struct PairRequest {
     code: String,
     name: String,
+    /// 앱이 토큰을 직접 받아 보관할 때 true. 브라우저(Origin 있음)에는 주지 않는다.
+    #[serde(default)]
+    token_in_body: bool,
 }
 
 #[derive(Serialize)]
 struct PairResponse {
     device: DeviceView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
 }
 
 async fn pairing_exchange(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<PairRequest>,
 ) -> Result<Response, ApiError> {
     let (device, token) = st.svc.exchange_pairing_code(&req.code, &req.name).await?;
+    // 브라우저 스크립트가 토큰을 읽지 못하게: Origin이 있는 요청에는 본문으로 주지 않는다
+    let body_token =
+        (req.token_in_body && !headers.contains_key(header::ORIGIN)).then(|| token.clone());
     let secure = if st.cfg.secure_cookie { "; Secure" } else { "" };
     let cookie = format!(
         "{COOKIE}={token}; Path=/; Max-Age={COOKIE_MAX_AGE_SECS}; HttpOnly; SameSite=Lax{secure}"
     );
-    let mut res = Json(PairResponse { device }).into_response();
-    res.headers_mut().insert(
-        header::SET_COOKIE,
-        HeaderValue::from_str(&cookie).map_err(|e| ApiError::from(anyhow::Error::from(e)))?,
-    );
+    let app_client = body_token.is_some();
+    let mut res = Json(PairResponse {
+        device,
+        token: body_token,
+    })
+    .into_response();
+    // 앱은 쿠키를 쓰지 않으므로 토큰을 본문으로 준 경우에는 쿠키를 굽지 않는다
+    if !app_client {
+        res.headers_mut().insert(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&cookie).map_err(|e| ApiError::from(anyhow::Error::from(e)))?,
+        );
+    }
     Ok(res)
 }
 
 async fn snapshot(State(st): State<AppState>, _d: AuthDevice) -> Result<Response, ApiError> {
     Ok(Json(st.svc.snapshot().await?).into_response())
+}
+
+/// 실시간 스냅샷 스트림(SSE). 버전이 바뀌면 바로, 아니어도 30초마다 `snapshot` 이벤트를 보낸다.
+/// 앱은 이 연결 하나로 상시 알림을 갱신한다(푸시 없음). 기기가 해제되면 스트림을 닫는다.
+async fn stream(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    _d: AuthDevice,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let token = device_token(&headers).unwrap_or_default().to_string();
+    let svc = st.svc.clone();
+    let events = futures_util::stream::unfold(
+        (svc, token, None::<i64>, Instant::now()),
+        |(svc, token, last, mut sent_at)| async move {
+            if last.is_some() {
+                // 다음 보낼 때까지 1초 간격으로 버전 확인
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let v = svc.snapshot_version().await.ok();
+                    if v != last || sent_at.elapsed() >= Duration::from_secs(30) {
+                        break;
+                    }
+                }
+            }
+            match svc.authenticate(&token).await {
+                Ok(Some(_)) => {}
+                Ok(None) => return None, // 해제된 기기: 스트림 종료
+                Err(e) => tracing::warn!("스트림 재인증 일시 실패(계속 진행): {e:#}"),
+            }
+            let (event, version) = match svc.snapshot().await {
+                Ok(snap) => {
+                    let v = snap.version;
+                    let data = serde_json::to_string(&snap).unwrap_or_default();
+                    (Event::default().event("snapshot").data(data), Some(v))
+                }
+                Err(e) => {
+                    tracing::error!("스트림 스냅샷 실패: {e:#}");
+                    // 실패가 이어져도 1초마다 DB를 두드리지 않게 잠시 쉰다
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    (
+                        Event::default().event("error").data("snapshot_failed"),
+                        last,
+                    )
+                }
+            };
+            sent_at = Instant::now();
+            Some((Ok(event), (svc, token, version.or(Some(-1)), sent_at)))
+        },
+    );
+    Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
 async fn decision_detail(
@@ -263,6 +358,15 @@ async fn put_push_subscription(
     Json(sub): Json<PushSubscription>,
 ) -> Result<StatusCode, ApiError> {
     st.svc.set_push_subscription(&dev.id, &sub).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// 앱의 '이 폰 등록 해제': 서버에서도 이 기기의 토큰을 무효로 한다.
+async fn revoke_self(
+    State(st): State<AppState>,
+    AuthDevice(dev): AuthDevice,
+) -> Result<StatusCode, ApiError> {
+    st.svc.revoke_device(&dev.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

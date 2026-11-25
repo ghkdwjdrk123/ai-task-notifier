@@ -25,6 +25,20 @@ pub struct Snapshot {
     pub providers: Vec<ProviderHealth>,
     pub sessions: Vec<SessionView>,
     pub decisions: Vec<DecisionSummary>,
+    /// 제공자별 구독 사용량(마지막으로 보고된 값).
+    pub usage: Vec<UsageView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UsageView {
+    pub provider: String,
+    /// 창 이름(예: "five_hour", "seven_day").
+    pub window: String,
+    pub used_percent: f64,
+    pub resets_at: Option<DateTime<Utc>>,
+    pub status: Option<String>,
+    /// 이 값을 받은 시각. 오래됐으면 화면에 'N분 전'으로 표시한다.
+    pub observed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,6 +96,15 @@ fn summary(d: &DecisionRow) -> DecisionSummary {
 }
 
 impl Service {
+    /// 현재 스냅샷 버전만 읽는다(스트림이 변화를 싸게 감지하는 데 씀).
+    pub async fn snapshot_version(&self) -> Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT value FROM meta WHERE key = 'snapshot_version'")
+                .fetch_one(&self.pool)
+                .await?,
+        )
+    }
+
     pub async fn snapshot(&self) -> Result<Snapshot> {
         self.expire_due().await?;
         let now = self.now();
@@ -142,8 +165,27 @@ impl Service {
         .iter()
         .map(|r| DecisionRow::from_row(r).map(|d| summary(&d)))
         .collect::<Result<Vec<_>>>()?;
+        let usage = sqlx::query(
+            "SELECT provider, window, used_percent, resets_at, status, observed_at FROM usage_windows \
+             ORDER BY provider, window",
+        )
+        .fetch_all(&mut *tx)
+        .await?
+        .iter()
+        .map(|r| {
+            Ok(UsageView {
+                provider: r.try_get("provider")?,
+                window: r.try_get("window")?,
+                used_percent: r.try_get("used_percent")?,
+                resets_at: r.try_get::<Option<i64>, _>("resets_at")?.map(to_datetime),
+                status: r.try_get("status")?,
+                observed_at: to_datetime(r.try_get("observed_at")?),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
         tx.commit().await?;
         Ok(Snapshot {
+            usage,
             version,
             server_time: to_datetime(now),
             running,

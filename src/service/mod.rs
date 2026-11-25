@@ -16,7 +16,9 @@ pub use answers::{SubmissionView, SubmitRequest};
 pub use devices::DeviceView;
 pub use events::IngestResult;
 pub use outbox::OutboxStats;
-pub use snapshot::{DecisionDetail, DecisionSummary, ProviderHealth, SessionView, Snapshot};
+pub use snapshot::{
+    DecisionDetail, DecisionSummary, ProviderHealth, SessionView, Snapshot, UsageView,
+};
 
 use crate::clock::Clock;
 use crate::model::{CloseReason, DecisionState, Question, SessionState};

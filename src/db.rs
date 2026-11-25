@@ -13,7 +13,8 @@ use std::path::Path;
 use std::time::Duration;
 
 const V1_INIT: &str = include_str!("../migrations/0001_init.sql");
-pub const SCHEMA_VERSION: i64 = 1;
+const V2_USAGE: &str = include_str!("../migrations/0002_usage.sql");
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub type Tx = Transaction<'static, Sqlite>;
 
@@ -81,6 +82,15 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             .await
             .context("스키마 v1 적용 실패")?;
         sqlx::query("PRAGMA user_version = 1")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 2 {
+        sqlx::raw_sql(V2_USAGE)
+            .execute(&mut *tx)
+            .await
+            .context("스키마 v2 적용 실패")?;
+        sqlx::query("PRAGMA user_version = 2")
             .execute(&mut *tx)
             .await?;
     }
