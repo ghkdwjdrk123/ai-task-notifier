@@ -775,7 +775,7 @@ async fn stale_provider_marks_snapshot_degraded() {
     let h = harness().await;
     h.start(CLAUDE, "s1").await;
     assert!(!h.svc.snapshot().await.unwrap().degraded);
-    h.clock.advance(120_001);
+    h.clock.advance(15 * 60_000 + 1);
     let snap = h.svc.snapshot().await.unwrap();
     assert!(snap.degraded && snap.providers[0].stale);
     assert_eq!(
@@ -1052,4 +1052,37 @@ async fn concurrent_duplicate_submissions_create_one() {
     );
     h.svc.deliver_pending().await.unwrap();
     assert_eq!(h.provider.delivered().len(), 1);
+}
+
+#[tokio::test]
+async fn stale_sessions_are_swept() {
+    let h = harness().await;
+    h.start(CLAUDE, "busy").await;
+    h.start(CLAUDE, "asking").await;
+    h.decide("asking", "r1", vec![q(QD, &["가", "나"])], None)
+        .await;
+    h.send(ev(CLAUDE, "quiet", EventKind::TurnEnded)).await;
+    // 3시간 동안 아무 소식 없음 → 진행 중이던 세션은 유휴로(열린 결정이 있는 세션은 그대로)
+    h.clock.advance(3 * 3600 * 1000 + 1);
+    assert_eq!(h.svc.sweep_sessions().await.unwrap(), 1);
+    assert_eq!(h.counts().await, (0, 1));
+    let brief = h.svc.session_brief(CLAUDE, "busy").await.unwrap().unwrap();
+    assert_eq!(brief.state, SessionState::Idle);
+    // 유휴로 하루가 지나면 목록에서 빠진다
+    h.clock.advance(24 * 3600 * 1000 + 1);
+    h.svc.sweep_sessions().await.unwrap();
+    let names: Vec<_> = h
+        .svc
+        .snapshot()
+        .await
+        .unwrap()
+        .sessions
+        .into_iter()
+        .map(|s| s.state)
+        .collect();
+    assert_eq!(
+        names,
+        vec![SessionState::WaitingDecision],
+        "결정 대기 세션만 남음"
+    );
 }

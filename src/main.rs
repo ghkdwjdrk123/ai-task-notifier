@@ -2,6 +2,7 @@
 
 use ai_task_notifier::api::{self, ApiConfig, AppState};
 use ai_task_notifier::clock::SystemClock;
+use ai_task_notifier::collect;
 use ai_task_notifier::db;
 use ai_task_notifier::model::ProviderEvent;
 use ai_task_notifier::provider::FakeProvider;
@@ -40,6 +41,20 @@ enum Cmd {
         /// 시험용: 이 이름의 제공자에 대한 답을 바로 '수락'으로 처리하는 가짜 제공자를 붙인다.
         #[arg(long)]
         demo_provider: Option<String>,
+        /// Claude 사용량을 `claude -p /usage`로 5분마다 읽는다(모델 호출 없음). 이 설정 폴더의 로그인을 쓴다.
+        #[arg(long, value_name = "CLAUDE_CONFIG_DIR")]
+        claude_usage: Option<PathBuf>,
+        /// claude 실행 파일 경로(LaunchAgent처럼 PATH가 짧을 때 절대 경로로).
+        #[arg(long, default_value = "claude")]
+        claude_bin: PathBuf,
+        /// Codex 기록 폴더를 지켜본다(보통 ~/.codex).
+        #[arg(long, value_name = "CODEX_HOME")]
+        codex: Option<PathBuf>,
+    },
+    /// Claude Code 훅에서 부른다: 표준 입력의 훅 JSON을 반영한다. 항상 0으로 끝나고 표준 출력에 아무것도 쓰지 않는다.
+    Hook {
+        /// 지금은 "claude"만.
+        provider: String,
     },
     /// 표준 입력의 제공자 이벤트(JSON 한 줄에 하나)를 넣는다. 훅·시험용.
     Ingest,
@@ -62,7 +77,26 @@ fn default_db() -> Result<PathBuf> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 훅은 인자 해석(clap)을 거치지 않는다: 해석 실패 시 종료 코드 2가 나오면
+    // Claude Code가 그것을 '막기'로 받아들인다(Stop 중단 방지·프롬프트 삭제·도구 차단).
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("hook") {
+        let provider = args.get(2).cloned().unwrap_or_default();
+        let db = std::env::var_os("NOTIFIER_DB")
+            .map(PathBuf::from)
+            .or_else(|| default_db().ok());
+        if let Some(db) = db {
+            match tokio::time::timeout(Duration::from_secs(4), run_hook(&db, &provider)).await {
+                Ok(Err(e)) => eprintln!("notifier hook: {e:#}"),
+                Err(_) => eprintln!("notifier hook: 시간 초과(4초)"),
+                Ok(Ok(())) => {}
+            }
+        }
+        return Ok(());
+    }
+    // 로그는 표준 오류로(훅의 표준 출력은 Claude 대화 문맥에 들어갈 수 있음)
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
@@ -72,6 +106,7 @@ async fn main() -> Result<()> {
         Some(p) => p,
         None => default_db()?,
     };
+
     let pool = db::open(&db_path).await?;
     let mut base = Service::new(pool.clone(), Arc::new(SystemClock));
     if let Cmd::Serve {
@@ -151,11 +186,15 @@ async fn main() -> Result<()> {
                 bail!("사용 중인 기기가 아닙니다: {device_id}");
             }
         }
+        Cmd::Hook { .. } => unreachable!("hook은 main 앞부분에서 처리"),
         Cmd::Serve {
             listen,
             allowed_origins,
             insecure_cookie,
             demo_provider: _,
+            claude_usage,
+            claude_bin,
+            codex,
         } => {
             if !listen.ip().is_loopback() {
                 bail!("루프백 주소에서만 실행합니다(폰 접속은 Tailscale Serve 등 사설망 HTTPS로)");
@@ -179,6 +218,14 @@ async fn main() -> Result<()> {
                     allowed_origins,
                     secure_cookie: !insecure_cookie,
                 },
+                Collectors {
+                    claude_usage: claude_usage.map(|dir| ClaudeUsage {
+                        bin: claude_bin,
+                        config_dir: dir,
+                        work_dir: db_path.with_file_name("claude-usage-cwd"),
+                    }),
+                    codex_home: codex,
+                },
             )
             .await?;
             drop(lock);
@@ -188,17 +235,57 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn serve(svc: Arc<Service>, listen: SocketAddr, cfg: ApiConfig) -> Result<()> {
+struct ClaudeUsage {
+    bin: PathBuf,
+    config_dir: PathBuf,
+    work_dir: PathBuf,
+}
+
+struct Collectors {
+    claude_usage: Option<ClaudeUsage>,
+    codex_home: Option<PathBuf>,
+}
+
+async fn run_hook(db_path: &std::path::Path, provider: &str) -> Result<()> {
+    if provider != "claude" {
+        bail!("지원하지 않는 훅 제공자: {provider}");
+    }
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut input)?;
+    let Some(pool) = db::open_for_hook(db_path).await? else {
+        return Ok(()); // DB가 아직 없음(서버를 한 번도 안 띄움): 아무것도 하지 않는다
+    };
+    let svc = Service::new(pool.clone(), Arc::new(SystemClock));
+    let r = collect::run_claude_hook(&svc, &input).await;
+    pool.close().await;
+    r
+}
+
+async fn serve(
+    svc: Arc<Service>,
+    listen: SocketAddr,
+    cfg: ApiConfig,
+    collectors: Collectors,
+) -> Result<()> {
     let recovered = svc.recover_after_restart().await?;
     if recovered > 0 {
         tracing::warn!("재시작 전 전달 중이던 답 {recovered}건을 '반영 확인 중'으로 돌렸습니다");
     }
     let wake = Arc::new(Notify::new());
-    let worker = tokio::spawn(run_worker(svc.clone(), wake.clone()));
-    // 실제 제공자 어댑터(Claude Code·Codex)는 아직 없다. --demo-provider로 붙인 시험용 제공자만 답을 받는다.
-    tracing::info!(
-        "실제 제공자 어댑터 미연결: --demo-provider로 지정한 제공자 외의 답은 전달되지 않습니다"
-    );
+    let mut tasks = vec![tokio::spawn(run_worker(svc.clone(), wake.clone()))];
+    if let Some(cu) = collectors.claude_usage {
+        tracing::info!(
+            "Claude 사용량 수집: 5분마다 /usage(설정 폴더 {})",
+            cu.config_dir.display()
+        );
+        tasks.push(tokio::spawn(run_claude_usage(svc.clone(), cu)));
+    }
+    if let Some(home) = collectors.codex_home {
+        tracing::info!("Codex 기록 감시: {}", home.join("sessions").display());
+        tasks.push(tokio::spawn(run_codex_watch(svc.clone(), home)));
+    }
+    // 답을 원래 세션에 넣는 어댑터는 아직 없다(관측만). --demo-provider로 붙인 시험용 제공자만 답을 받는다.
+    tracing::info!("답 전달 어댑터 미연결: 폰에서 보낸 답은 --demo-provider 제공자에만 전달됩니다");
 
     let app = api::router(AppState {
         svc,
@@ -229,13 +316,46 @@ async fn serve(svc: Arc<Service>, listen: SocketAddr, cfg: ApiConfig) -> Result<
     {
         tracing::warn!("열린 연결을 기다리지 않고 종료합니다");
     }
-    worker.abort();
+    tasks.iter().for_each(|t| t.abort());
     Ok(())
+}
+
+/// Claude 사용량: 시작 직후 한 번, 이후 5분마다.
+async fn run_claude_usage(svc: Arc<Service>, cu: ClaudeUsage) {
+    loop {
+        match collect::read_claude_usage(&cu.bin, &cu.config_dir, &cu.work_dir).await {
+            Ok(windows) => {
+                let ev = ProviderEvent {
+                    provider: collect::CLAUDE.into(),
+                    session_id: "-".into(),
+                    event_id: format!("claude-usage:{}", uuid::Uuid::new_v4().simple()),
+                    kind: ai_task_notifier::model::EventKind::UsageReported { windows },
+                };
+                if let Err(e) = svc.ingest(&ev).await {
+                    tracing::warn!("Claude 사용량 반영 실패: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("Claude 사용량 읽기 실패: {e:#}"),
+        }
+        tokio::time::sleep(Duration::from_secs(300)).await;
+    }
+}
+
+/// Codex 기록: 5초마다 새 줄 확인.
+async fn run_codex_watch(svc: Arc<Service>, home: PathBuf) {
+    let mut w = collect::CodexWatcher::new(&home);
+    loop {
+        if let Err(e) = w.poll(&svc).await {
+            tracing::warn!("Codex 기록 읽기 실패: {e:#}");
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 }
 
 /// 마감 처리·답 전달(1초마다 또는 답 접수 즉시), 반영 확인(10초마다).
 async fn run_worker(svc: Arc<Service>, wake: Arc<Notify>) {
     let mut last_reconcile = tokio::time::Instant::now();
+    let mut last_sweep = tokio::time::Instant::now();
     loop {
         tokio::select! {
             _ = wake.notified() => {}
@@ -246,6 +366,12 @@ async fn run_worker(svc: Arc<Service>, wake: Arc<Notify>) {
         }
         if let Err(e) = svc.deliver_pending().await {
             tracing::error!("답 전달 실패: {e:#}");
+        }
+        if last_sweep.elapsed() >= Duration::from_secs(60) {
+            last_sweep = tokio::time::Instant::now();
+            if let Err(e) = svc.sweep_sessions().await {
+                tracing::error!("세션 정리 실패: {e:#}");
+            }
         }
         if last_reconcile.elapsed() >= Duration::from_secs(10) {
             last_reconcile = tokio::time::Instant::now();

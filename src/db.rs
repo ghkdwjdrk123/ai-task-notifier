@@ -68,7 +68,14 @@ fn restrict(_path: &Path, _mode: u32) -> Result<()> {
 
 /// PRAGMA user_version으로 스키마 버전을 관리한다.
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
-    // 버전은 쓰기 잠금을 잡은 뒤 읽는다(다른 프로세스가 동시에 처음 열 때 두 번 적용하지 않게)
+    // 이미 최신이면 쓰기 잠금 없이 끝낸다(훅처럼 자주 여는 경우의 비용·잠금 대기를 줄임)
+    let current: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(pool)
+        .await?;
+    if current == SCHEMA_VERSION {
+        return Ok(());
+    }
+    // 버전은 쓰기 잠금을 잡은 뒤 다시 읽는다(다른 프로세스가 동시에 처음 열 때 두 번 적용하지 않게)
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(&mut *tx)
@@ -96,6 +103,34 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     }
     tx.commit().await?;
     Ok(())
+}
+
+/// 훅용: 이미 있는 최신 DB만 연다(없으면 None — 만들지 않음). 잠금 대기는 3초로 짧게.
+pub async fn open_for_hook(file: &Path) -> Result<Option<SqlitePool>> {
+    if !file.exists() {
+        return Ok(None);
+    }
+    let opts = SqliteConnectOptions::new()
+        .filename(file)
+        .create_if_missing(false)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(3))
+        .pragma("secure_delete", "on");
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await?;
+    let v: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&pool)
+        .await?;
+    if v != SCHEMA_VERSION {
+        // 서버가 아직 마이그레이션하지 않은 DB: 훅은 건드리지 않는다
+        pool.close().await;
+        return Ok(None);
+    }
+    Ok(Some(pool))
 }
 
 /// 쓰기 트랜잭션 시작.

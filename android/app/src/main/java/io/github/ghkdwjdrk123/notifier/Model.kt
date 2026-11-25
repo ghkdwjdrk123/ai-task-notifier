@@ -135,10 +135,12 @@ object Names {
         else -> p
     }
 
-    fun window(w: String) = when (w) {
-        "five_hour" -> "5시간"
-        "seven_day" -> "주간"
-        "seven_day_opus" -> "주간(Opus)"
+    fun window(w: String) = when {
+        w == "five_hour" -> "5시간"
+        w == "seven_day" -> "주간"
+        w.startsWith("seven_day_") -> "주간(${w.removePrefix("seven_day_").replaceFirstChar { it.uppercase() }})"
+        w.startsWith("window_") && w.endsWith("m") -> w.removePrefix("window_").removeSuffix("m").toIntOrNull()
+            ?.let { m -> if (m % 1440 == 0) "${m / 1440}일" else if (m % 60 == 0) "${m / 60}시간" else "${m}분" } ?: w
         else -> w
     }
 
@@ -146,7 +148,7 @@ object Names {
         "running" -> "진행 중"
         "idle" -> "대기"
         "waiting_decision" -> "결정 대기"
-        "waiting_permission" -> "권한 승인 대기"
+        "waiting_permission" -> "입력 대기(맥에서 확인)"
         else -> s
     }
 

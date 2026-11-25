@@ -30,8 +30,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// 제공자 이벤트가 이 시간(밀리초)보다 오래 없으면 '갱신 지연'으로 본다(설계 3장 측정 목표).
-pub const STALE_AFTER_MS: i64 = 120_000;
+/// 제공자 이벤트가 이 시간(밀리초)보다 오래 없으면 '갱신 지연'으로 본다.
+/// 수집기가 사용량을 5분마다, Codex 감시가 1분마다 신호를 보내므로 15분.
+pub const STALE_AFTER_MS: i64 = 15 * 60_000;
 /// 결정 푸시의 최대 유효 시간(마감이 없을 때).
 pub const PUSH_MAX_TTL_MS: i64 = 24 * 3600 * 1000;
 pub const DEFAULT_PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -309,5 +310,95 @@ impl Service {
         let n = expire_due_in(&mut tx, self.now()).await?;
         tx.commit().await?;
         Ok(n)
+    }
+}
+
+/// 세션 요약(훅이 쓰기 전에 확인하는 용도).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionBrief {
+    pub state: SessionState,
+    pub updated_at: i64,
+    pub title: String,
+}
+
+/// 진행 중·대기 상태로 이 시간(밀리초) 넘게 소식이 없으면 유휴로 본다(종료 신호를 놓친 세션).
+pub const SWEEP_ACTIVE_AFTER_MS: i64 = 3 * 3600 * 1000;
+/// 유휴로 이 시간 넘게 소식이 없으면 끝난 세션으로 보고 목록에서 뺀다.
+pub const SWEEP_IDLE_AFTER_MS: i64 = 24 * 3600 * 1000;
+
+impl Service {
+    /// 세션의 현재 상태·마지막 관측 시각·제목. 없으면 None.
+    pub async fn session_brief(
+        &self,
+        provider: &str,
+        provider_session_id: &str,
+    ) -> Result<Option<SessionBrief>> {
+        let row = sqlx::query(
+            "SELECT state, updated_at, title FROM sessions WHERE provider = ? AND provider_session_id = ?",
+        )
+        .bind(provider)
+        .bind(provider_session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(match row {
+            Some(r) => {
+                let s: String = r.try_get("state")?;
+                SessionState::parse(&s).map(|state| SessionBrief {
+                    state,
+                    updated_at: r.try_get("updated_at").unwrap_or(0),
+                    title: r.try_get("title").unwrap_or_default(),
+                })
+            }
+            None => None,
+        })
+    }
+
+    /// 수집기가 살아 있다는 신호: 제공자의 마지막 이벤트 시각만 고친다(멱등 키를 쌓지 않음).
+    pub async fn heartbeat(&self, provider: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO providers (name, last_event_at) VALUES (?, ?) \
+             ON CONFLICT (name) DO UPDATE SET last_event_at = excluded.last_event_at",
+        )
+        .bind(provider)
+        .bind(self.now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 종료 신호를 놓친 세션 정리: 오래 조용한 진행·대기 세션은 유휴로, 오래된 유휴 세션은 완료로.
+    /// 열린 결정이 있는 세션은 건드리지 않는다. 바꾼 세션 수.
+    pub async fn sweep_sessions(&self) -> Result<usize> {
+        let now = self.now();
+        let mut tx = crate::db::begin(&self.pool).await?;
+        let a = sqlx::query(
+            "UPDATE sessions SET state = 'idle', updated_at = ? \
+             WHERE state IN ('running','waiting_permission') AND updated_at < ? \
+             AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.session_id = sessions.id \
+                             AND d.state IN ('open','sending','confirming'))",
+        )
+        .bind(now)
+        .bind(now - SWEEP_ACTIVE_AFTER_MS)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        let b = sqlx::query(
+            "UPDATE sessions SET state = 'completed', updated_at = ? WHERE state = 'idle' AND updated_at < ?",
+        )
+        .bind(now)
+        .bind(now - SWEEP_IDLE_AFTER_MS)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if a + b > 0 {
+            bump_version(&mut tx).await?;
+        }
+        // 멱등 키는 7일 지나면 지운다(재전송은 길어야 몇 분 안에 온다)
+        sqlx::query("DELETE FROM event_keys WHERE received_at < ?")
+            .bind(now - 7 * 24 * 3600 * 1000)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok((a + b) as usize)
     }
 }

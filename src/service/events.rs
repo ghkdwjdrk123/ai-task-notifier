@@ -95,13 +95,21 @@ async fn record_usage(
                 "사용량 상태 문자열이 너무 깁니다".into(),
             ));
         }
+        let observed = w.observed_at.filter(|t| *t <= now).unwrap_or(now);
         let old = sqlx::query(
-            "SELECT used_percent, resets_at, status FROM usage_windows WHERE provider = ? AND window = ?",
+            "SELECT used_percent, resets_at, status, observed_at FROM usage_windows WHERE provider = ? AND window = ?",
         )
         .bind(provider)
         .bind(&w.name)
         .fetch_optional(&mut *conn)
         .await?;
+        // 이미 저장된 값보다 옛 관측이면 덮어쓰지 않는다(늦게 도착한 옛 보고)
+        if let Some(r) = &old {
+            let prev: i64 = r.try_get("observed_at")?;
+            if observed < prev {
+                continue;
+            }
+        }
         let differs = match &old {
             None => true,
             Some(r) => {
@@ -125,7 +133,7 @@ async fn record_usage(
         .bind(w.used_percent)
         .bind(w.resets_at)
         .bind(&w.status)
-        .bind(now)
+        .bind(observed)
         .execute(&mut *conn)
         .await?;
     }
@@ -289,14 +297,24 @@ impl Service {
         match &ev.kind {
             EventKind::Heartbeat | EventKind::UsageReported { .. } => unreachable!(),
             EventKind::SessionStarted { title } => {
-                if !created && !title.trim().is_empty() {
-                    let t: String = title.trim().chars().take(MAX_TITLE).collect();
-                    sqlx::query("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?")
-                        .bind(t)
-                        .bind(now)
-                        .bind(&sid)
-                        .execute(&mut *tx)
-                        .await?;
+                let t: String = title.trim().chars().take(MAX_TITLE).collect();
+                if !created && !t.is_empty() {
+                    // 제목이 같으면 쓰지 않는다(스냅샷 버전을 괜히 올리지 않게)
+                    let n = sqlx::query(
+                        "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ? AND title <> ?",
+                    )
+                    .bind(&t)
+                    .bind(now)
+                    .bind(&sid)
+                    .bind(&t)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+                    changed |= n > 0;
+                }
+                // 끝난 세션을 다시 열었으면(재개) 유휴로 되살린다
+                if state.is_terminal() {
+                    set_session(&mut tx, &sid, SessionState::Idle, now).await?;
                     changed = true;
                 }
             }

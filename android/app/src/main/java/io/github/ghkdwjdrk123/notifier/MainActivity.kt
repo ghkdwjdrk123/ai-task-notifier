@@ -154,9 +154,15 @@ class MainActivity : Activity() {
                 card.addView(Ui.text(this, Names.provider(p), 16f, bold = true))
                 ws.sortedBy { it.window }.forEach { w ->
                     val pct = w.usedPercent.roundToInt()
-                    val reset = w.resetsAt?.let { " · ${clock.format(it)} 초기화" } ?: ""
-                    card.addView(Ui.text(this, "${Names.window(w.window)} $pct%$reset", 14f))
-                    card.addView(Ui.bar(this, pct))
+                    // 초기화 시각이 지났으면 옛 값 대신 '초기화됨'(새 보고가 오면 다시 숫자)
+                    val wasReset = w.resetsAt?.let { !it.isAfter(Instant.now()) } ?: false
+                    val line = if (wasReset) {
+                        "${Names.window(w.window)} 초기화됨 · 마지막 값 $pct%"
+                    } else {
+                        "${Names.window(w.window)} $pct%" + (w.resetsAt?.let { " · ${clock.format(it)} 초기화" } ?: "")
+                    }
+                    card.addView(Ui.text(this, line, 14f))
+                    card.addView(Ui.bar(this, if (wasReset) 0 else pct))
                     card.addView(Ui.gap(this, 6))
                 }
                 val age = Duration.between(ws.maxOf { it.observedAt }, Instant.now())

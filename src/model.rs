@@ -137,7 +137,7 @@ pub struct ProviderEvent {
     pub kind: EventKind,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventKind {
     /// 세션이 생겼다(아직 작업 전: 유휴).
@@ -201,6 +201,9 @@ pub struct UsageWindow {
     /// 제공자가 준 상태(예: "allowed", "allowed_warning", "rejected").
     #[serde(default)]
     pub status: Option<String>,
+    /// 이 값을 관측한 시각(UTC 밀리초). 없으면 받은 시각. 기록 파일에서 읽은 옛 값의 '○시간 전' 표시에 쓴다.
+    #[serde(default)]
+    pub observed_at: Option<i64>,
 }
 
 /// 원래 요청에 답을 넣은 결과.

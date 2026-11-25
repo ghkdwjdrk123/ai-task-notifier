@@ -10,6 +10,7 @@
 
 pub mod api;
 pub mod clock;
+pub mod collect;
 pub mod db;
 pub mod model;
 pub mod provider;

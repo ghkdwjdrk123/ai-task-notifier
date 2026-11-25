@@ -11,19 +11,42 @@
 
 ## 상태
 
-**서버와 Android 앱이 데모 제공자로 끝까지 동작합니다.** 실제 Claude Code·Codex 연결(어댑터)은 아직입니다.
+**실제 Claude Code·Codex의 세션 수와 구독 사용량을 폰 상시 알림에 보여 줍니다.** 폰에서 보낸 답을 실제 세션에 넣는 기능은 아직입니다(데모 제공자로만 동작).
 
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | 0 | 에이전트 질문 왕복, 폰 Web Push 실기 검증 | 완료(일부 측정은 4단계로) |
 | 1 | 상태·API 서버(가짜 제공자로 검증) | 완료: 인수 테스트 T01~T10·T12·T13·T16~T20 자동화 |
 | 2a | 상시 알림 Android 앱, 사용량·실시간 스트림·앱 인증 | 완료(실기 설치 전) |
-| 2b | Claude Code 어댑터(실제 세션·질문·사용량) | 예정 |
+| 2b | 실제 데이터 수집: Claude Code 세션(훅)·Claude 사용량(`/usage`)·Codex 세션·사용량(기록 파일) | 완료(관측만) |
+| 2c | 폰에서 보낸 답을 실제 세션에 넣기 | 예정 |
 | 2 | Claude Code 한 세션 왕복 + PWA 화면 | 예정 |
 | 3 | Codex 연동, 동시 작업 | 예정 |
 | 4 | 외부 접속·알림 안정성 측정 | 예정 |
 
 자세한 요구사항, 상태 모델, 인수 테스트, 검증 결과는 [docs/design.md](docs/design.md)에 있습니다.
+
+## 실제 데이터 수집
+
+| 대상 | 방법 | 비고 |
+|---|---|---|
+| Claude Code 세션 | Claude Code 훅 → `notifier hook claude` → DB | 세션 시작·프롬프트·멈춤·종료·권한 요청·질문(AskUserQuestion)·도구 완료. 제목은 작업 폴더 이름만, 프롬프트 내용은 저장하지 않음 |
+| Claude 사용량 | 서버가 5분마다 `claude -p /usage` 실행 | 모델 호출 없음. `--claude-usage <CLAUDE_CONFIG_DIR>`의 로그인 사용. 출력 문구가 바뀌면 갱신이 멈출 수 있음 |
+| Codex 세션·사용량 | 서버가 5초마다 `~/.codex/sessions/**/rollout-*.jsonl`의 새 줄을 읽음 | 최근 6시간 파일만. 시작 때 가장 최근 파일의 마지막 사용량을 '○시간 전' 값으로 표시 |
+
+Claude Code 전역 설정(`~/.claude/settings.json`)에 넣는 훅(각 이벤트에 추가):
+
+```json
+{"type": "command", "command": "/Users/<나>/.local/bin/notifier hook claude", "timeout": 5}
+```
+
+이벤트: `SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd`, `Notification`, `PermissionRequest`(matcher `*`), `PreToolUse`(matcher `AskUserQuestion`), `PostToolUse`·`PostToolUseFailure`(matcher `*`).
+
+서버 실행 예:
+
+```bash
+notifier serve --claude-usage ~/.config/<전용 폴더>/claude --claude-bin ~/.local/bin/claude --codex ~/.codex
+```
 
 ## 설계 요점
 

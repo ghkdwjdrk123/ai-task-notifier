@@ -408,6 +408,7 @@ async fn usage_reported_appears_in_snapshot() {
         used_percent: p,
         resets_at: Some(T0 + 3_600_000),
         status: Some("allowed".into()),
+        observed_at: None,
     };
     let v0 = h.svc.snapshot_version().await.unwrap();
     h.send(ev(
@@ -557,6 +558,7 @@ async fn invalid_usage_reports_are_rejected() {
         used_percent: p,
         resets_at: None,
         status: status.map(str::to_string),
+        observed_at: None,
     };
     let cases = vec![
         vec![w("five_hour", f64::NAN, None)],
@@ -574,4 +576,41 @@ async fn invalid_usage_reports_are_rejected() {
         assert!(r.is_err(), "경우 {i}는 거절돼야 함");
     }
     assert!(h.svc.snapshot().await.unwrap().usage.is_empty());
+}
+
+#[tokio::test]
+async fn older_usage_report_does_not_overwrite_newer() {
+    use ai_task_notifier::model::{EventKind, UsageWindow};
+    let h = harness().await;
+    let w = |p: f64, at: i64| UsageWindow {
+        name: "five_hour".into(),
+        used_percent: p,
+        resets_at: None,
+        status: None,
+        observed_at: Some(at),
+    };
+    h.send(ev(
+        CODEX,
+        "-",
+        EventKind::UsageReported {
+            windows: vec![w(40.0, T0 - 1_000)],
+        },
+    ))
+    .await;
+    // 늦게 도착한 더 옛 관측(30%)은 무시
+    h.send(ev(
+        CODEX,
+        "-",
+        EventKind::UsageReported {
+            windows: vec![w(30.0, T0 - 60_000)],
+        },
+    ))
+    .await;
+    let u = &h.svc.snapshot().await.unwrap().usage[0];
+    assert_eq!(u.used_percent, 40.0);
+    assert_eq!(
+        u.observed_at.timestamp_millis(),
+        T0 - 1_000,
+        "관측 시각은 기록 시각"
+    );
 }

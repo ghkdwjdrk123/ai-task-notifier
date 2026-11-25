@@ -1,6 +1,6 @@
 # AI 작업 상태·결정 대기 알림 설계
 
-상태: **설계 v0.4(상시 알림 Android 앱으로 전환) · 0단계 검증 완료 · 1단계 구현 완료 · 2단계 진행 중** · 원본: 「맥미니 AI 작업 상태·결정 대기 알림 개발 명세」 초안 v0.1(2026-11-24, 비공개)
+상태: **설계 v0.5 · 0·1단계 완료 · 2단계: 상시 알림 앱·실제 데이터 수집(관측) 완료, 답 전달 어댑터 예정** · 원본: 「맥미니 AI 작업 상태·결정 대기 알림 개발 명세」 초안 v0.1(2026-11-24, 비공개)
 
 ## 0. 이 문서가 원본과 다른 점
 
@@ -217,3 +217,14 @@ MVP 완료 조건: T01~T32(위 변경 포함) 통과, T31 실환경 통과, 동�
 - 푸시 대기열은 작업자 하나가 순서대로 처리한다(행 점유 없음). 실제 발송기를 붙이는 2단계에서 발송 시간 제한과 함께 점검.
 - 등록 코드 시도 횟수 제한 없음(코드 공간 약 49비트, 10분 유효).
 - `event_keys` 정리 없음.
+
+
+### 2b단계: 실제 데이터 수집(2026-11-26)
+
+| 대상 | 방법 | 확인한 사실 |
+|---|---|---|
+| Claude Code 세션 | 전역 훅 → `notifier hook claude`(항상 0 종료, 표준 출력 없음, 약 15ms) | 헤드리스 시험에서 SessionStart·UserPromptSubmit·Stop·SessionEnd 순서로 실행됨. 데스크톱 앱 세션 실측은 다음 프롬프트부터 |
+| Claude 사용량 | `claude -p /usage --output-format json`(턴 0·비용 0, 모델 호출 없음)의 텍스트 `Current session: N% used · resets …`, `Current week (all models): …` 파싱 | 초기화 시각은 맥 현지 시간대로 해석. 문구가 바뀌면 파싱 실패 → 갱신 지연으로 드러남 |
+| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`: `session_meta`(id·cwd), `event_msg/task_started`·`task_complete`, `event_msg/token_count.rate_limits`(primary 300분·secondary 10080분, `used_percent`, `resets_at` 초) | 대화 내용 줄은 읽지 않음(type만 보고 건너뜀). 관측 시각은 줄의 `timestamp` |
+
+규칙: 질문(AskUserQuestion)·권한 요청은 지금은 '입력 대기'로만 표시한다(폰 답변 불가). 진행·대기 상태로 3시간 소식이 없으면 유휴, 유휴로 24시간이면 목록에서 뺀다. 갱신 지연 기준은 15분(사용량 수집 5분·Codex 감시 신호 1분).
