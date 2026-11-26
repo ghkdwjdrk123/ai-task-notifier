@@ -118,15 +118,21 @@ class DecisionActivity : Activity() {
             card.addView(Ui.text(this, q.text, 16f, bold = true))
             val free = if (d.allowFreeText) EditText(this).apply { setTextColor(Ui.primary(context)); setHintTextColor(Ui.secondary(context)); hint = "직접 입력(선택지 대신)" } else null
             if (q.multiSelect) {
-                val boxes = q.options.map { o -> CheckBox(this).apply { text = label(o); setTextColor(Ui.primary(this@DecisionActivity)) } }
-                boxes.forEach(card::addView)
+                val boxes = q.options.map { o -> spaced(CheckBox(this).apply { text = label(o); setTextColor(Ui.primary(this@DecisionActivity)) }) }
+                boxes.forEachIndexed { i, b -> card.addView(b, optionParams(i == 0)) }
                 readers += {
                     val picked = q.options.filterIndexed { i, _ -> boxes[i].isChecked }.map { it.label }
                     q.text to (if (picked.isEmpty()) null else JSONArray(picked))
                 }
             } else {
                 val group = RadioGroup(this)
-                q.options.forEachIndexed { i, o -> group.addView(RadioButton(this).apply { id = 1000 + i; text = label(o); setTextColor(Ui.primary(this@DecisionActivity)) }) }
+                q.options.forEachIndexed { i, o ->
+                    val rb = spaced(RadioButton(this).apply { id = 1000 + i; text = label(o); setTextColor(Ui.primary(this@DecisionActivity)) })
+                    group.addView(rb, RadioGroup.LayoutParams(RadioGroup.LayoutParams.MATCH_PARENT, RadioGroup.LayoutParams.WRAP_CONTENT).apply {
+                        if (i > 0) topMargin = Ui.dp(this@DecisionActivity, 6)
+                    })
+                }
+                group.setPadding(0, Ui.dp(this, 6), 0, 0)
                 card.addView(group)
                 readers += {
                     val typed = free?.text?.toString()?.trim().orEmpty()
@@ -255,7 +261,29 @@ class DecisionActivity : Activity() {
         }.start()
     }
 
-    private fun label(o: Question.Option) = if (o.description.isNullOrBlank()) o.label else "${o.label}\n${o.description}"
+    /** 선택지 글: 이름은 크게, 설명은 한 줄 띄워 작고 흐리게. */
+    private fun label(o: Question.Option): CharSequence {
+        val d = o.description
+        if (d.isNullOrBlank()) return o.label
+        val s = android.text.SpannableStringBuilder(o.label).append("\n").append(d)
+        val start = o.label.length + 1
+        s.setSpan(android.text.style.RelativeSizeSpan(0.85f), start, s.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        s.setSpan(android.text.style.ForegroundColorSpan(Ui.secondary(this)), start, s.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        return s
+    }
+
+    /** 선택지 하나의 여백: 위아래로 띄우고 누르기 쉬운 높이(48dp 이상)로. */
+    private fun spaced(v: android.widget.CompoundButton) = v.apply {
+        textSize = 16f
+        setLineSpacing(Ui.dp(context, 3).toFloat(), 1f)
+        minHeight = Ui.dp(context, 52)
+        setPadding(Ui.dp(context, 8), Ui.dp(context, 10), 0, Ui.dp(context, 10))
+    }
+
+    private fun optionParams(first: Boolean) =
+        LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            if (!first) topMargin = Ui.dp(this@DecisionActivity, 6)
+        }
 
     private fun remaining(t: Instant): String {
         val d = Duration.between(Instant.now(), t)
