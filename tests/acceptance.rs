@@ -1107,3 +1107,30 @@ async fn old_decisions_and_sessions_are_purged() {
     assert_eq!(h.svc.purge_old_records().await.unwrap(), 1);
     assert!(h.svc.session_brief(CLAUDE, "s1").await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn acknowledged_session_leaves_awaiting_count_until_next_turn() {
+    let h = harness().await;
+    h.start(CLAUDE, "w").await;
+    h.send(ev(CLAUDE, "w", EventKind::TurnEnded)).await;
+    let snap = h.svc.snapshot().await.unwrap();
+    assert_eq!(snap.awaiting_input, 1);
+    let id = snap.sessions[0].id.clone();
+    let v = snap.version;
+    // 확인함 → 유휴, 수에서 빠지고 화면이 갱신된다
+    assert!(h.svc.acknowledge_session(&id).await.unwrap());
+    let snap = h.svc.snapshot().await.unwrap();
+    assert_eq!(snap.awaiting_input, 0);
+    assert_eq!(snap.sessions[0].state, SessionState::Idle);
+    assert!(snap.version > v);
+    // 지시 대기가 아니면 아무것도 하지 않는다
+    assert!(!h.svc.acknowledge_session(&id).await.unwrap());
+    assert!(matches!(
+        h.svc.acknowledge_session("없음").await,
+        Err(ServiceError::NotFound)
+    ));
+    // 다음 턴을 마치면 다시 지시 대기
+    h.send(ev(CLAUDE, "w", EventKind::TurnStarted)).await;
+    h.send(ev(CLAUDE, "w", EventKind::TurnEnded)).await;
+    assert_eq!(h.svc.snapshot().await.unwrap().awaiting_input, 1);
+}

@@ -55,6 +55,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/decisions/{id}", get(decision_detail))
         .route("/v1/decisions/{id}/answers", post(submit_answer))
         .route("/v1/decisions/{id}/answers/{sid}", get(get_submission))
+        .route("/v1/sessions/{id}/ack", post(ack_session))
         .route("/v1/device", delete(revoke_self))
         .route("/v1/app/latest", get(app_latest))
         .route("/v1/app/apk", get(app_apk))
@@ -349,6 +350,16 @@ async fn get_submission(
     Path((id, sid)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
     Ok(Json(st.svc.get_submission(&id, &sid).await?).into_response())
+}
+
+/// 지시 대기 세션 '확인함'(지시 대기 수에서 뺌).
+async fn ack_session(
+    State(st): State<AppState>,
+    _d: AuthDevice,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    st.svc.acknowledge_session(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// 앱의 '이 폰 등록 해제': 서버에서도 이 기기의 토큰을 무효로 한다.

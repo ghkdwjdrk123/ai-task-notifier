@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.ghkdwjdrk123.notifier"
         minSdk = 31
         targetSdk = 36
-        versionCode = 8
-        versionName = "0.2.1"
+        versionCode = 9
+        versionName = "0.2.2"
     }
 
     buildTypes {

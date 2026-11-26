@@ -115,6 +115,11 @@ class Api(private val baseUrl: String, private val token: String?) {
         }
     }
 
+    /** 지시 대기 세션 '확인함': 지시 대기 수에서 뺀다(다음 턴을 마치면 다시 지시 대기). */
+    fun ackSession(id: String) {
+        send("/v1/sessions/${enc(id)}/ack", "POST", null)
+    }
+
     /** 맥에 올려 둔 최신 앱 버전. 없으면 404 ApiException. */
     fun appLatest(): Updater.Latest {
         val j = send("/v1/app/latest", "GET", null)

@@ -218,8 +218,11 @@ class MainActivity : Activity() {
                     card.addView(Ui.text(this, s.title, 16f, bold = true))
                     val ended = s.updatedAt?.let { "${ago(Duration.between(it, Instant.now()))} 작업을 마침" } ?: "작업을 마침"
                     card.addView(Ui.text(this, "${Names.provider(s.provider)} · $ended · 맥에서 이어서 지시하세요", 13f, muted = true))
+                    // 일부러 놔둔 세션은 '확인함'으로 수에서 뺀다(다시 일을 마치면 돌아옴)
+                    card.addView(Ui.button(this, "확인함") { ackSessions(listOf(s.id)) })
                     col.addView(card)
                 }
+                if (awaiting.size > 1) col.addView(Ui.button(this, "모두 확인함 (${awaiting.size})") { ackSessions(awaiting.map { it.id }) })
             }
 
             // 사용량
@@ -312,6 +315,18 @@ class MainActivity : Activity() {
                 .show()
         })
         col.addView(Ui.text(this, prefs.serverUrl, 12f, muted = true))
+    }
+
+    /** 지시 대기 세션을 '확인함'으로. 결과는 실시간 스트림으로 화면에 돌아온다. */
+    private fun ackSessions(ids: List<String>) {
+        val api = Api(prefs.serverUrl, prefs.token)
+        Thread {
+            val failed = ids.count { runCatching { api.ackSession(it) }.isFailure }
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                if (failed > 0) android.widget.Toast.makeText(this, "맥에 알리지 못했어요. 연결을 확인하세요", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }.start()
     }
 
     private fun openDecision(id: String) {

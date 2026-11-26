@@ -319,6 +319,31 @@ pub const DECISION_RETAIN_MS: i64 = 24 * 3600 * 1000;
 pub const SESSION_RETAIN_MS: i64 = 7 * 24 * 3600 * 1000;
 
 impl Service {
+    /// 폰의 '확인함': 지시 대기 세션을 유휴로 돌려 지시 대기 수에서 뺀다.
+    /// 다음 턴이 시작되면 다시 진행 중 → 턴을 마치면 다시 지시 대기가 된다.
+    /// 지시 대기가 아니면 아무것도 하지 않는다. 없는 세션이면 NotFound.
+    pub async fn acknowledge_session(&self, id: &str) -> Result<bool, ServiceError> {
+        let mut tx = crate::db::begin(&self.pool).await?;
+        let state: Option<String> = sqlx::query_scalar("SELECT state FROM sessions WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(state) = state else {
+            return Err(ServiceError::NotFound);
+        };
+        if state != SessionState::AwaitingInput.as_str() {
+            return Ok(false);
+        }
+        // updated_at은 그대로 둔다(마지막 작업 시각·정리 기준)
+        sqlx::query("UPDATE sessions SET state = 'idle' WHERE id = ? AND state = 'awaiting_input'")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        bump_version(&mut tx).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     /// 세션의 현재 상태·마지막 관측 시각·제목. 없으면 None.
     pub async fn session_brief(
         &self,
