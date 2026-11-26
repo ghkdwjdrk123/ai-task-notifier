@@ -132,13 +132,14 @@ cd android && ./gradlew :app:assembleDebug
 android/publish.sh   # 빌드 → ~/.local/share/ai-task-notifier/app/latest.apk·latest.json
 ```
 
-**서명 키 백업**: 앱 안 업데이트는 처음 설치한 앱과 같은 키로 서명돼야 한다(지금은 빌드한 맥의 `~/.android/debug.keystore`). 이 키를 잃으면 앱을 지우고 새로 설치·등록해야 하므로 비밀번호를 건 디스크 이미지로 백업해 둔다. 비밀번호는 실행 중에 직접 입력하고, 만든 뒤 같은 비밀번호로 열어 확인한다.
+**서명 키**(0.3.0부터): 정식(release) 빌드를 전용 키로 서명한다(debuggable 꺼짐). 키는 맥에서 한 번 만들고, 비밀번호는 무작위로 만들어 맥 키체인에만 둔다. `publish.sh`가 서명할 때 키체인에서 읽는다. 앱 안 업데이트는 처음 설치한 앱과 같은 키로 서명돼야 하므로, 키를 잃으면 앱을 지우고 새로 설치·등록해야 한다. 그래서 키와 비밀번호를 비밀번호를 건 디스크 이미지로 백업해 둔다(이미지 비밀번호는 실행 중에 직접 입력).
 
 ```bash
-android/backup-signing-key.sh   # 기본 저장 위치: iCloud Drive/ai-task-notifier-signing-key.dmg
+android/make-release-key.sh      # 처음 한 번: ~/.config/ai-task-notifier/release.keystore + 키체인
+android/backup-signing-key.sh    # 기본 저장 위치: iCloud Drive/ai-task-notifier-release-key.dmg
 ```
 
-되살리기: 이미지를 열어 `debug.keystore`를 `~/.android/`에 복사한다(이미지 안 `README.txt`에 인증서 지문과 방법).
+되살리기: 이미지를 열어 안의 `README.txt`대로 키 파일을 복사하고 키체인에 비밀번호를 등록한다.
 
 실제 어댑터 없이 시험하려면 데모 제공자로 서버를 띄우고 이벤트를 넣습니다.
 
