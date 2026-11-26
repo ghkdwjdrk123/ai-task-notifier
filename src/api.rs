@@ -35,6 +35,8 @@ pub struct ApiConfig {
     pub allowed_origins: Vec<String>,
     /// 쿠키에 Secure를 붙인다(HTTPS로만 접속할 때 true).
     pub secure_cookie: bool,
+    /// 앱 업데이트 폴더(`latest.apk`·`latest.json`). 등록된 기기에만 내려준다.
+    pub app_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone)]
@@ -55,6 +57,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/decisions/{id}/answers", post(submit_answer))
         .route("/v1/decisions/{id}/answers/{sid}", get(get_submission))
         .route("/v1/device", delete(revoke_self))
+        .route("/v1/app/latest", get(app_latest))
+        .route("/v1/app/apk", get(app_apk))
         .route(
             "/v1/device/push-subscription",
             put(put_push_subscription).delete(delete_push_subscription),
@@ -376,4 +380,79 @@ async fn delete_push_subscription(
 ) -> Result<StatusCode, ApiError> {
     st.svc.delete_push_subscription(&dev.id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------- 앱 업데이트 ----------
+
+/// 받을 APK 크기 상한(요청마다 메모리로 읽으므로).
+const MAX_APK_BYTES: u64 = 200 * 1024 * 1024;
+
+/// `latest.json`(android/publish.sh가 씀): 버전과 APK의 크기·SHA-256.
+#[derive(Deserialize, Serialize)]
+struct AppLatest {
+    version_code: i64,
+    version_name: String,
+    size: u64,
+    /// APK 전체의 SHA-256(소문자 16진). 앱이 받은 파일이 온전한지 확인한다.
+    sha256: String,
+}
+
+fn no_app() -> ApiError {
+    ApiError::new(
+        StatusCode::NOT_FOUND,
+        "no_app",
+        "맥에 올려 둔 앱 업데이트가 없습니다",
+    )
+}
+
+fn publishing() -> ApiError {
+    ApiError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "publishing",
+        "앱 업데이트를 올리는 중입니다. 잠시 뒤 다시 시도하세요",
+    )
+}
+
+/// 앱 업데이트 폴더의 버전 정보. 폴더·파일이 없으면 no_app.
+async fn app_meta(st: &AppState) -> Result<(std::path::PathBuf, AppLatest), ApiError> {
+    let dir = st.cfg.app_dir.clone().ok_or_else(no_app)?;
+    let raw = match tokio::fs::read(dir.join("latest.json")).await {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(no_app()),
+        Err(e) => return Err(anyhow::Error::from(e).into()),
+    };
+    let meta: AppLatest = serde_json::from_slice(&raw).map_err(anyhow::Error::from)?;
+    match tokio::fs::metadata(dir.join("latest.apk")).await {
+        Ok(m) if m.len() == meta.size && m.len() <= MAX_APK_BYTES => Ok((dir, meta)),
+        Ok(_) => Err(publishing()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(no_app()),
+        Err(e) => Err(anyhow::Error::from(e).into()),
+    }
+}
+
+async fn app_latest(State(st): State<AppState>, _d: AuthDevice) -> Result<Response, ApiError> {
+    let (_, meta) = app_meta(&st).await?;
+    Ok(Json(meta).into_response())
+}
+
+async fn app_apk(State(st): State<AppState>, _d: AuthDevice) -> Result<Response, ApiError> {
+    let (dir, meta) = app_meta(&st).await?;
+    let apk = tokio::fs::read(dir.join("latest.apk"))
+        .await
+        .map_err(anyhow::Error::from)?;
+    use sha2::Digest;
+    // 올리는 도중(APK와 버전 파일이 어긋남)이면 내려주지 않는다
+    if apk.len() as u64 != meta.size || hex::encode(sha2::Sha256::digest(&apk)) != meta.sha256 {
+        return Err(publishing());
+    }
+    let mut res = apk.into_response();
+    let h = res.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/vnd.android.package-archive"),
+    );
+    if let Ok(v) = HeaderValue::from_str(&meta.sha256) {
+        h.insert("x-apk-sha256", v);
+    }
+    Ok(res)
 }

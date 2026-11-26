@@ -115,5 +115,44 @@ class Api(private val baseUrl: String, private val token: String?) {
         }
     }
 
+    /** 맥에 올려 둔 최신 앱 버전. 없으면 404 ApiException. */
+    fun appLatest(): Updater.Latest {
+        val j = send("/v1/app/latest", "GET", null)
+        return Updater.Latest(j.getLong("version_code"), j.getString("version_name"), j.getLong("size"), j.getString("sha256"))
+    }
+
+    /** 최신 APK를 [dest]에 받는다. 크기·SHA-256이 다르면 지우고 실패. */
+    fun downloadApk(dest: java.io.File, size: Long, sha256: String) {
+        val c = open("/v1/app/apk", "GET")
+        c.readTimeout = 60_000
+        c.setRequestProperty("Accept", "application/vnd.android.package-archive")
+        try {
+            val code = c.responseCode
+            if (code != 200) throw ApiException(code, "http_$code", "앱 파일을 받지 못했습니다(HTTP $code)")
+            val md = java.security.MessageDigest.getInstance("SHA-256")
+            var n = 0L
+            c.inputStream.use { input ->
+                dest.outputStream().use { out ->
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val r = input.read(buf)
+                        if (r < 0) break
+                        n += r
+                        if (n > size) break
+                        md.update(buf, 0, r)
+                        out.write(buf, 0, r)
+                    }
+                }
+            }
+            val got = md.digest().joinToString("") { "%02x".format(it) }
+            if (n != size || got != sha256) {
+                dest.delete()
+                throw UpdateCheckFailed("받은 앱 파일이 온전하지 않아요(크기·해시 불일치). 다시 시도하세요")
+            }
+        } finally {
+            c.disconnect()
+        }
+    }
+
     private fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
 }

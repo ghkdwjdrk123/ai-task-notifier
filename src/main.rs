@@ -45,6 +45,10 @@ enum Cmd {
         /// Claude 사용량을 `claude -p /usage`로 5분마다 읽는다(모델 호출 없음). 이 설정 폴더의 로그인을 쓴다.
         #[arg(long, value_name = "CLAUDE_CONFIG_DIR")]
         claude_usage: Option<PathBuf>,
+        /// 폰 앱 업데이트 폴더(`latest.apk`·`latest.json`, `android/publish.sh`가 만든다).
+        /// 기본: DB 옆 `app` 폴더.
+        #[arg(long)]
+        app_dir: Option<PathBuf>,
         /// claude 실행 파일 경로(LaunchAgent처럼 PATH가 짧을 때 절대 경로로).
         #[arg(long, default_value = "claude")]
         claude_bin: PathBuf,
@@ -229,6 +233,7 @@ async fn main() -> Result<()> {
             demo_provider: _,
             claude_usage,
             claude_bin,
+            app_dir,
             codex,
         } => {
             if !listen.ip().is_loopback() {
@@ -252,6 +257,7 @@ async fn main() -> Result<()> {
                 ApiConfig {
                     allowed_origins,
                     secure_cookie: !insecure_cookie,
+                    app_dir: Some(app_dir.unwrap_or_else(|| db_path.with_file_name("app"))),
                 },
                 Collectors {
                     claude_usage: claude_usage.map(|dir| ClaudeUsage {

@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- 앱 안에서 업데이트: 맥에서 받은 새 버전을 설치 화면으로 넘긴다(설치는 사용자가 확인) -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:allowBackup="false"
@@ -40,6 +42,10 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Persistent status of the user's own AI coding sessions running on their own computer" />
         </service>
+
+        <receiver
+            android:name=".InstallReceiver"
+            android:exported="false" />
 
         <receiver
             android:name=".BootReceiver"

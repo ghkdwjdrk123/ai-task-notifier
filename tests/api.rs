@@ -21,6 +21,7 @@ fn app(h: &H) -> Router {
         cfg: Arc::new(ApiConfig {
             allowed_origins: vec![ORIGIN.into()],
             secure_cookie: true,
+            app_dir: None,
         }),
         wake: Arc::new(Notify::new()),
     })
@@ -613,4 +614,72 @@ async fn older_usage_report_does_not_overwrite_newer() {
         T0 - 1_000,
         "관측 시각은 기록 시각"
     );
+}
+
+#[tokio::test]
+async fn app_update_is_served_to_paired_devices_only() {
+    let h = harness().await;
+    let dir = tempfile::tempdir().unwrap();
+    let with_dir = |d: Option<std::path::PathBuf>| {
+        api::router(AppState {
+            svc: h.svc.clone(),
+            cfg: Arc::new(ApiConfig {
+                allowed_origins: vec![ORIGIN.into()],
+                secure_cookie: true,
+                app_dir: d,
+            }),
+            wake: Arc::new(Notify::new()),
+        })
+    };
+    let app = with_dir(Some(dir.path().to_path_buf()));
+    let c = paired(&h, &app).await;
+    // 인증 없으면 거절
+    let (st, _, _) = call(&app, "GET", "/v1/app/latest", None, None, None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    let (st, _, _) = call(&app, "GET", "/v1/app/apk", None, None, None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    // 올려 둔 것이 없으면 404
+    let (st, _, v) = call(&app, "GET", "/v1/app/latest", Some(&c), None, None).await;
+    assert_eq!((st, v["error"].as_str()), (StatusCode::NOT_FOUND, Some("no_app")));
+    let (st, _, _) = call(&with_dir(None), "GET", "/v1/app/latest", Some(&c), None, None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    let apk = b"PK\x03\x04fake-apk-bytes".to_vec();
+    use sha2::Digest;
+    let sha = hex::encode(sha2::Sha256::digest(&apk));
+    std::fs::write(dir.path().join("latest.apk"), &apk).unwrap();
+    // 올리는 도중: 버전 파일이 다른 APK를 가리키면 503
+    std::fs::write(
+        dir.path().join("latest.json"),
+        json!({"version_code": 7, "version_name": "0.2.0", "size": apk.len(), "sha256": "00"}).to_string(),
+    )
+    .unwrap();
+    let (st, _, v) = call(&app, "GET", "/v1/app/apk", Some(&c), None, None).await;
+    assert_eq!((st, v["error"].as_str()), (StatusCode::SERVICE_UNAVAILABLE, Some("publishing")));
+    std::fs::write(
+        dir.path().join("latest.json"),
+        json!({"version_code": 7, "version_name": "0.2.0", "size": apk.len(), "sha256": sha}).to_string(),
+    )
+    .unwrap();
+    let (st, _, v) = call(&app, "GET", "/v1/app/latest", Some(&c), None, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        v,
+        json!({"version_code": 7, "version_name": "0.2.0", "size": apk.len(), "sha256": sha})
+    );
+    let req = Request::builder()
+        .uri("/v1/app/apk")
+        .header(header::COOKIE, format!("{COOKIE}={c}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()[header::CONTENT_TYPE],
+        "application/vnd.android.package-archive"
+    );
+    assert_eq!(res.headers()["x-apk-sha256"], sha.as_str());
+    assert_eq!(res.headers()[header::CACHE_CONTROL], "no-store");
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), apk.as_slice());
 }

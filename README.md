@@ -126,6 +126,12 @@ cd android && ./gradlew :app:assembleDebug
 
 결과: `android/app/build/outputs/apk/debug/app-debug.apk`. 폰에 설치한 뒤 서버 주소(Tailscale Serve HTTPS)와 `notifier pair` 코드를 넣으면 상시 알림이 뜹니다. 화면이 꺼져도 연결을 유지하려면 앱 안내에 따라 배터리 최적화를 해제하세요.
 
+**앱 안에서 업데이트**(0.2.0부터): 새 버전을 빌드해 서버의 앱 업데이트 폴더(기본 DB 옆 `app/`)에 올리면, 앱 대시보드에 '새 버전 … 업데이트 설치' 카드가 뜹니다(10분마다 확인, 설정의 '업데이트 확인'으로 바로). 앱은 등록된 기기 토큰으로 받고 크기·SHA-256을 확인한 뒤 안드로이드 설치 화면으로 넘깁니다. 처음 한 번은 이 앱의 '출처를 알 수 없는 앱 설치' 허용이 필요합니다. 기존 앱과 같은 키로 서명된 APK만 설치됩니다.
+
+```bash
+android/publish.sh   # 빌드 → ~/.local/share/ai-task-notifier/app/latest.apk·latest.json
+```
+
 실제 어댑터 없이 시험하려면 데모 제공자로 서버를 띄우고 이벤트를 넣습니다.
 
 ```bash
@@ -147,6 +153,8 @@ echo '{"provider":"demo","session_id":"m1","event_id":"e1","type":"turn_started"
 | `GET /v1/decisions/{id}/answers/{submission_id}` | 제출 상태 |
 | `GET /v1/stream` | 실시간 스냅샷(SSE). 버전이 바뀌면 즉시, 아니어도 30초마다 |
 | `DELETE /v1/device` | 이 기기 등록 해제(토큰 무효) |
+| `GET /v1/app/latest` | 앱 업데이트 폴더의 최신 버전 `{version_code, version_name, size, sha256}`(없으면 404 `no_app`) |
+| `GET /v1/app/apk` | 최신 APK(`application/vnd.android.package-archive`, `x-apk-sha256`) |
 | `PUT`·`DELETE /v1/device/push-subscription` | 브라우저 Web Push 구독(현재 앱은 쓰지 않음) |
 
 인증: 앱은 등록 때 `token_in_body: true`로 토큰을 받아 `Authorization: Bearer`로 보냅니다. 브라우저는 쿠키를 쓰며, 쿠키를 실은 쓰기 요청은 `Origin`이 `--allowed-origin` 중 하나여야 합니다. 오류는 `{error, message}` JSON입니다.

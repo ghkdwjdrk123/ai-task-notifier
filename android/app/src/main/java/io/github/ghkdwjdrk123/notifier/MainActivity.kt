@@ -41,10 +41,55 @@ class MainActivity : Activity() {
         if (prefs.isPaired) {
             if (prefs.statusEnabled) StatusService.start(this)
             StatusHub.listen(listener)
+            Updater.visible = true
+            checkUpdate()
         }
     }
 
+    // ---------- 앱 업데이트 ----------
+
+    /** 10분에 한 번 맥에 새 버전이 있는지 본다. */
+    private fun checkUpdate(force: Boolean = false) {
+        if (!force && System.currentTimeMillis() - Updater.lastCheckMs < 10 * 60_000) return
+        val api = Api(prefs.serverUrl, prefs.token)
+        Thread {
+            runCatching { Updater.check(this, api) }
+            runOnUiThread { if (!isDestroyed) renderDashboard(StatusHub.state) }
+        }.start()
+    }
+
+    private fun startUpdate(l: Updater.Latest) {
+        if (Updater.running.get()) return
+        // 처음 한 번은 '이 앱에서 설치 허용'을 켜야 한다
+        if (!packageManager.canRequestPackageInstalls()) {
+            AlertDialog.Builder(this)
+                .setTitle("설치 허용이 필요해요")
+                .setMessage("새 버전을 설치하려면 이 앱에 '출처를 알 수 없는 앱 설치'를 허용해야 해요. 설정에서 켠 뒤 돌아와 다시 누르세요.")
+                .setPositiveButton("설정 열기") { _, _ ->
+                    startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+                }
+                .setNegativeButton("취소", null)
+                .show()
+            return
+        }
+        // 한 번에 하나만(화면 회전 등으로 다시 만들어져도)
+        if (!Updater.running.compareAndSet(false, true)) return
+        Updater.message = "새 버전을 받는 중…"
+        renderDashboard(StatusHub.state)
+        val api = Api(prefs.serverUrl, prefs.token)
+        val app = applicationContext
+        Thread {
+            val err = runCatching { Updater.downloadAndInstall(app, api, l) }.exceptionOrNull()
+            // 성공 문구는 설치 결과(InstallReceiver)가 정한다
+            if (err != null) Updater.message = "업데이트 실패: ${err.message}"
+            else if (Updater.message == "새 버전을 받는 중…") Updater.message = "설치 화면을 여는 중…"
+            Updater.running.set(false)
+            runOnUiThread { if (!isDestroyed) renderDashboard(StatusHub.state) }
+        }.start()
+    }
+
     override fun onPause() {
+        Updater.visible = false
         StatusHub.unlisten(listener)
         super.onPause()
     }
@@ -130,6 +175,15 @@ class MainActivity : Activity() {
             ))
         }
         col.addView(Ui.status(this, linkText(st), linkColor(st)))
+
+        Updater.available?.let { l ->
+            val card = Ui.card(this, accent = true)
+            card.addView(Ui.text(this, "새 버전 ${l.versionName}이 있어요", 16f, bold = true))
+            card.addView(Ui.text(this, "지금 ${Updater.installedName(this)} · ${"%.1f".format(l.size / 1_048_576.0)}MB · 맥에서 받아요", 13f, muted = true))
+            Updater.message?.let { card.addView(Ui.text(this, it, 14f)) }
+            if (!Updater.running.get()) card.addView(Ui.button(this, "업데이트 설치") { startUpdate(l) })
+            col.addView(card)
+        }
 
         if (st.link == Link.UNAUTHORIZED) {
             col.addView(Ui.button(this, "다시 등록") {
@@ -226,6 +280,18 @@ class MainActivity : Activity() {
                 },
             ),
         )
+        col.addView(Ui.button(this, "업데이트 확인 (지금 ${Updater.installedName(this)})") {
+            Updater.message = null
+            Thread {
+                val r = runCatching { Updater.check(this, Api(prefs.serverUrl, prefs.token)) }
+                runOnUiThread {
+                    if (isDestroyed) return@runOnUiThread
+                    val msg = r.fold({ if (it == null) "최신 버전이에요" else null }, { "확인 실패: ${it.message}" })
+                    msg?.let { android.widget.Toast.makeText(this, it, android.widget.Toast.LENGTH_SHORT).show() }
+                    renderDashboard(StatusHub.state)
+                }
+            }.start()
+        })
         col.addView(Ui.button(this, "이 폰 등록 해제") {
             AlertDialog.Builder(this)
                 .setMessage("이 폰의 연결 정보를 지우고 맥에서도 이 기기 등록을 해제합니다.")
