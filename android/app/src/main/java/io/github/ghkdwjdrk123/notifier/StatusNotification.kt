@@ -78,15 +78,17 @@ object StatusNotification {
                 val title = Names.summary(snap) + staleSuffix(st, snap, now)
                 val usage = usageLine(snap, now).ifEmpty { "사용량 정보 없음" }
                 val big = StringBuilder(usage)
+                val names = Names.displayTitles(snap.sessions, now)
                 snap.decisions.take(3).forEach { big.append("\n• 결정: ").append(it.title) }
                 snap.sessions.filter { it.state == "awaiting_input" }.take(3).forEach {
-                    big.append("\n• 지시 대기: ").append(Names.provider(it.provider)).append(" ").append(it.title)
-                    it.updatedAt?.let { at -> big.append(" (").append(clock.format(at)).append(" 끝남)") }
+                    big.append("\n• 지시 대기: ").append(Names.provider(it.provider)).append(" ").append(names[it.id] ?: it.title)
+                    Names.elapsed(it.stateSince, now)?.let { e -> big.append(" (").append(e).append(if (e == "방금") ")" else "째)") }
                 }
                 snap.sessions.filter { it.state !in setOf("idle", "awaiting_input", "waiting_decision") }.take(3).forEach {
-                    big.append("\n• ").append(Names.provider(it.provider)).append(" ").append(it.title)
-                        .append(" — ").append(Names.sessionState(it.state))
+                    big.append("\n• ").append(Names.provider(it.provider)).append(" ").append(names[it.id] ?: it.title)
+                        .append(" — ").append(Names.stateWithElapsed(it, now))
                 }
+                snap.usageErrors.forEach { (p, e) -> big.append("\n⚠ ").append(Names.provider(p)).append(" 사용량: ").append(e) }
                 val single = snap.decisions.singleOrNull()?.takeIf { it.state == "open" }?.id
                 Content(title, usage, big.toString(), usage, iconLabel, waiting > 0 || awaiting > 0, single)
             }

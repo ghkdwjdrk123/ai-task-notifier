@@ -48,6 +48,10 @@ pub struct ProviderHealth {
     pub name: String,
     pub last_event_at: DateTime<Utc>,
     pub stale: bool,
+    /// 사용량을 읽지 못하는 이유(예: 로그인 만료). 정상이면 없음.
+    pub usage_error: Option<String>,
+    /// 그 실패가 처음 난 시각.
+    pub usage_error_since: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,6 +61,10 @@ pub struct SessionView {
     pub title: String,
     pub state: SessionState,
     pub updated_at: DateTime<Utc>,
+    /// 세션을 처음 본 시각(같은 폴더 세션 구분용).
+    pub created_at: DateTime<Utc>,
+    /// 지금 상태가 된 시각('12분째 진행 중').
+    pub state_since: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -129,7 +137,9 @@ impl Service {
         )
         .fetch_one(&mut *tx)
         .await?;
-        let providers = sqlx::query("SELECT name, last_event_at FROM providers ORDER BY name")
+        let providers = sqlx::query(
+            "SELECT name, last_event_at, usage_error, usage_error_at FROM providers ORDER BY name",
+        )
             .fetch_all(&mut *tx)
             .await?
             .iter()
@@ -139,11 +149,16 @@ impl Service {
                     name: r.try_get("name")?,
                     last_event_at: to_datetime(last),
                     stale: now - last > STALE_AFTER_MS,
+                    usage_error: r.try_get("usage_error")?,
+                    usage_error_since: r
+                        .try_get::<Option<i64>, _>("usage_error_at")?
+                        .map(to_datetime),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
         let sessions = sqlx::query(
-            "SELECT id, provider, title, state, updated_at FROM sessions \
+            "SELECT id, provider, title, state, updated_at, created_at, \
+             COALESCE(state_since, updated_at) AS state_since FROM sessions \
              WHERE state NOT IN ('completed','interrupted','failed') ORDER BY created_at",
         )
         .fetch_all(&mut *tx)
@@ -157,6 +172,8 @@ impl Service {
                 title: r.try_get("title")?,
                 state: SessionState::parse(&state).context("알 수 없는 세션 상태")?,
                 updated_at: to_datetime(r.try_get("updated_at")?),
+                created_at: to_datetime(r.try_get("created_at")?),
+                state_since: to_datetime(r.try_get("state_since")?),
             })
         })
         .collect::<Result<Vec<_>>>()?;

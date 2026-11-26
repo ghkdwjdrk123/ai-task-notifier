@@ -210,13 +210,14 @@ class MainActivity : Activity() {
             }
 
             // 지시 대기: 턴을 마치고 내 다음 지시를 기다리는 세션
+            val names = Names.displayTitles(snap.sessions)
             val awaiting = snap.sessions.filter { it.state == "awaiting_input" }
             if (awaiting.isNotEmpty()) {
                 col.addView(Ui.heading(this, "내 지시를 기다리는 세션"))
-                awaiting.sortedByDescending { it.updatedAt }.forEach { s ->
+                awaiting.sortedByDescending { it.stateSince }.forEach { s ->
                     val card = Ui.card(this, accent = true)
-                    card.addView(Ui.text(this, s.title, 16f, bold = true))
-                    val ended = s.updatedAt?.let { "${ago(Duration.between(it, Instant.now()))} 작업을 마침" } ?: "작업을 마침"
+                    card.addView(Ui.text(this, names[s.id] ?: s.title, 16f, bold = true))
+                    val ended = (s.stateSince ?: s.updatedAt)?.let { "${ago(Duration.between(it, Instant.now()))} 작업을 마침" } ?: "작업을 마침"
                     card.addView(Ui.text(this, "${Names.provider(s.provider)} · $ended · 맥에서 이어서 지시하세요", 13f, muted = true))
                     // 일부러 놔둔 세션은 '확인함'으로 수에서 뺀다(다시 일을 마치면 돌아옴)
                     card.addView(Ui.button(this, "확인함") { ackSessions(listOf(s.id)) })
@@ -227,10 +228,16 @@ class MainActivity : Activity() {
 
             // 사용량
             col.addView(Ui.heading(this, "구독 사용량"))
-            if (snap.usage.isEmpty()) col.addView(Ui.text(this, "아직 보고된 사용량이 없어요", muted = true))
-            snap.usage.groupBy { it.provider }.forEach { (p, ws) ->
+            if (snap.usage.isEmpty() && snap.usageErrors.isEmpty()) col.addView(Ui.text(this, "아직 보고된 사용량이 없어요", muted = true))
+            // 사용량을 한 번도 못 받은 제공자도 실패 이유는 보여 준다
+            val usageByProvider = snap.usage.groupBy { it.provider }.toMutableMap()
+            snap.usageErrors.keys.forEach { usageByProvider.putIfAbsent(it, emptyList()) }
+            usageByProvider.forEach { (p, ws) ->
                 val card = Ui.card(this)
                 card.addView(Ui.text(this, Names.provider(p), 16f, bold = true))
+                snap.usageErrors[p]?.let { e ->
+                    card.addView(Ui.text(this, "⚠ 사용량을 읽지 못하고 있어요: $e", 13f, bold = true).apply { setTextColor(0xFFD97706.toInt()) })
+                }
                 ws.sortedBy { it.window }.forEach { w ->
                     val pct = w.usedPercent.roundToInt()
                     // 초기화 시각이 지났으면 옛 값 대신 '초기화됨'(새 보고가 오면 다시 숫자)
@@ -244,8 +251,10 @@ class MainActivity : Activity() {
                     card.addView(Ui.bar(this, if (wasReset) 0 else pct))
                     card.addView(Ui.gap(this, 6))
                 }
-                val age = Duration.between(ws.maxOf { it.observedAt }, Instant.now())
-                card.addView(Ui.text(this, "마지막 보고: ${ago(age)}", 12f, muted = true))
+                if (ws.isNotEmpty()) {
+                    val age = Duration.between(ws.maxOf { it.observedAt }, Instant.now())
+                    card.addView(Ui.text(this, "마지막 보고: ${ago(age)}", 12f, muted = true))
+                }
                 col.addView(card)
             }
 
@@ -253,7 +262,7 @@ class MainActivity : Activity() {
             col.addView(Ui.heading(this, "활성 세션"))
             if (snap.sessions.isEmpty()) col.addView(Ui.text(this, "활성 세션 없음", muted = true))
             snap.sessions.sortedBy { Names.sessionOrder(it.state) }.forEach { s ->
-                col.addView(Ui.text(this, "• ${Names.provider(s.provider)} ${s.title} — ${Names.sessionState(s.state)}"))
+                col.addView(Ui.text(this, "• ${Names.provider(s.provider)} ${names[s.id] ?: s.title} — ${Names.stateWithElapsed(s)}"))
             }
         }
 

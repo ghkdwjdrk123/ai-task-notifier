@@ -1134,3 +1134,43 @@ async fn acknowledged_session_leaves_awaiting_count_until_next_turn() {
     h.send(ev(CLAUDE, "w", EventKind::TurnEnded)).await;
     assert_eq!(h.svc.snapshot().await.unwrap().awaiting_input, 1);
 }
+
+#[tokio::test]
+async fn sessions_report_state_since_and_created_at() {
+    let h = harness().await;
+    h.start(CLAUDE, "w").await;
+    h.clock.advance(5 * 60_000);
+    h.send(ev(CLAUDE, "w", EventKind::SubagentActivity)).await;
+    let s = h.svc.snapshot().await.unwrap().sessions.remove(0);
+    // 관측만 갱신된 것은 상태 시작 시각을 바꾸지 않는다
+    assert_eq!(s.state_since.timestamp_millis(), T0);
+    assert_eq!(s.created_at.timestamp_millis(), T0);
+    h.clock.advance(60_000);
+    h.send(ev(CLAUDE, "w", EventKind::TurnEnded)).await;
+    let s = h.svc.snapshot().await.unwrap().sessions.remove(0);
+    assert_eq!(s.state, SessionState::AwaitingInput);
+    assert_eq!(s.state_since.timestamp_millis(), T0 + 6 * 60_000);
+    assert_eq!(s.created_at.timestamp_millis(), T0);
+}
+
+#[tokio::test]
+async fn usage_error_is_reported_until_cleared() {
+    let h = harness().await;
+    h.start(CLAUDE, "w").await;
+    let err = h.svc.snapshot().await.unwrap();
+    assert!(err.providers.iter().all(|p| p.usage_error.is_none()));
+    h.svc.set_usage_error(CLAUDE, Some("로그인 만료")).await.unwrap();
+    let snap = h.svc.snapshot().await.unwrap();
+    let p = snap.providers.iter().find(|p| p.name == CLAUDE).unwrap();
+    assert_eq!(p.usage_error.as_deref(), Some("로그인 만료"));
+    assert_eq!(p.usage_error_since.unwrap().timestamp_millis(), T0);
+    // 같은 오류를 다시 적어도 화면 버전·시작 시각은 그대로
+    h.clock.advance(300_000);
+    h.svc.set_usage_error(CLAUDE, Some("로그인 만료")).await.unwrap();
+    let again = h.svc.snapshot().await.unwrap();
+    assert_eq!(again.version, snap.version);
+    h.svc.set_usage_error(CLAUDE, None).await.unwrap();
+    let ok = h.svc.snapshot().await.unwrap();
+    assert!(ok.version > snap.version);
+    assert!(ok.providers.iter().all(|p| p.usage_error.is_none() && p.usage_error_since.is_none()));
+}

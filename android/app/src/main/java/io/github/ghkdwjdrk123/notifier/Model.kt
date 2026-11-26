@@ -16,6 +16,8 @@ data class Snapshot(
     val sessions: List<SessionItem>,
     val decisions: List<DecisionItem>,
     val usage: List<UsageItem>,
+    /** 제공자 → 사용량을 못 읽는 이유(예: 로그인 만료). */
+    val usageErrors: Map<String, String> = emptyMap(),
 ) {
     companion object {
         fun parse(j: JSONObject) = Snapshot(
@@ -28,6 +30,9 @@ data class Snapshot(
             sessions = j.optJSONArray("sessions").objects().map(SessionItem::parse),
             decisions = j.optJSONArray("decisions").objects().map(DecisionItem::parse),
             usage = j.optJSONArray("usage").objects().map(UsageItem::parse),
+            usageErrors = j.optJSONArray("providers").objects()
+                .mapNotNull { p -> p.optStringOrNull("usage_error")?.let { p.getString("name") to it } }
+                .toMap(),
         )
     }
 }
@@ -38,11 +43,17 @@ data class SessionItem(
     val title: String,
     val state: String,
     val updatedAt: Instant?,
+    /** 처음 본 시각(같은 폴더 세션 구분). */
+    val createdAt: Instant?,
+    /** 지금 상태가 된 시각('12분째'). */
+    val stateSince: Instant?,
 ) {
     companion object {
         fun parse(j: JSONObject) = SessionItem(
             j.getString("id"), j.getString("provider"), j.getString("title"), j.getString("state"),
             j.optStringOrNull("updated_at")?.let(Instant::parse),
+            j.optStringOrNull("created_at")?.let(Instant::parse),
+            j.optStringOrNull("state_since")?.let(Instant::parse),
         )
     }
 }
@@ -153,6 +164,46 @@ object Names {
         w.startsWith("window_") && w.endsWith("m") -> w.removePrefix("window_").removeSuffix("m").toIntOrNull()
             ?.let { m -> if (m % 1440 == 0) "${m / 1440}일" else if (m % 60 == 0) "${m / 60}시간" else "${m}분" } ?: w
         else -> w
+    }
+
+    private val hm = java.time.format.DateTimeFormatter.ofPattern("HH:mm").withZone(java.time.ZoneId.systemDefault())
+    private val mdhm = java.time.format.DateTimeFormatter.ofPattern("M/d HH:mm").withZone(java.time.ZoneId.systemDefault())
+
+    /** 경과 시간: "방금", "12분", "1시간 5분", "2일". */
+    fun elapsed(from: Instant?, now: Instant = Instant.now()): String? {
+        from ?: return null
+        val m = java.time.Duration.between(from, now).toMinutes().coerceAtLeast(0)
+        return when {
+            m < 1 -> "방금"
+            m < 60 -> "${m}분"
+            m < 24 * 60 -> if (m % 60 == 0L) "${m / 60}시간" else "${m / 60}시간 ${m % 60}분"
+            else -> "${m / (24 * 60)}일"
+        }
+    }
+
+    /** 상태와 경과: "진행 중 · 12분째", "지시 대기 · 5분째". 유휴는 경과 없이. */
+    fun stateWithElapsed(s: SessionItem, now: Instant = Instant.now()): String {
+        val e = if (s.state == "idle") null else elapsed(s.stateSince, now)
+        return sessionState(s.state) + (e?.let { if (it == "방금") " · 방금" else " · ${it}째" } ?: "")
+    }
+
+    /**
+     * 화면에 보일 세션 이름. 같은 제공자·같은 제목(같은 폴더)이 여럿이면 처음 본 시각을 붙여 구분한다.
+     * 예: "rust (09:41~)", 다른 날이면 "rust (11/25 09:41~)".
+     */
+    fun displayTitles(sessions: List<SessionItem>, now: Instant = Instant.now()): Map<String, String> {
+        val dup = sessions.groupBy { it.provider to it.title }.filterValues { it.size > 1 }.keys
+        val today = java.time.LocalDate.now(java.time.ZoneId.systemDefault())
+        return sessions.associate { s ->
+            val c = s.createdAt
+            val name = if ((s.provider to s.title) in dup && c != null) {
+                val sameDay = c.atZone(java.time.ZoneId.systemDefault()).toLocalDate() == today
+                "${s.title} (${(if (sameDay) hm else mdhm).format(c)}~)"
+            } else {
+                s.title
+            }
+            s.id to name
+        }
     }
 
     /** 맨 위 요약 한 줄. */

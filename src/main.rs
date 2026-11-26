@@ -382,8 +382,16 @@ async fn run_claude_usage(svc: Arc<Service>, cu: ClaudeUsage) {
                 if let Err(e) = svc.ingest(&ev).await {
                     tracing::warn!("Claude 사용량 반영 실패: {e}");
                 }
+                if let Err(e) = svc.set_usage_error(collect::CLAUDE, None).await {
+                    tracing::warn!("사용량 상태 기록 실패: {e:#}");
+                }
             }
-            Err(e) => tracing::warn!("Claude 사용량 읽기 실패: {e:#}"),
+            Err(e) => {
+                tracing::warn!("Claude 사용량 읽기 실패: {e:#}");
+                if let Err(e2) = svc.set_usage_error(collect::CLAUDE, Some(&e.to_string())).await {
+                    tracing::warn!("사용량 상태 기록 실패: {e2:#}");
+                }
+            }
         }
         tokio::time::sleep(Duration::from_secs(300)).await;
     }

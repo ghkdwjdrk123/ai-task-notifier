@@ -16,7 +16,8 @@ const V1_INIT: &str = include_str!("../migrations/0001_init.sql");
 const V2_USAGE: &str = include_str!("../migrations/0002_usage.sql");
 const V3_HOOK_WAITS: &str = include_str!("../migrations/0003_hook_waits.sql");
 const V4_DROP_PUSH: &str = include_str!("../migrations/0004_drop_push.sql");
-pub const SCHEMA_VERSION: i64 = 4;
+const V5_STATE_SINCE: &str = include_str!("../migrations/0005_state_since_usage_error.sql");
+pub const SCHEMA_VERSION: i64 = 5;
 
 pub type Tx = Transaction<'static, Sqlite>;
 
@@ -118,6 +119,15 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             .await
             .context("스키마 v4 적용 실패")?;
         sqlx::query("PRAGMA user_version = 4")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 5 {
+        sqlx::raw_sql(V5_STATE_SINCE)
+            .execute(&mut *tx)
+            .await
+            .context("스키마 v5 적용 실패")?;
+        sqlx::query("PRAGMA user_version = 5")
             .execute(&mut *tx)
             .await?;
     }

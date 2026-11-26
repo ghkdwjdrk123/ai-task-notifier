@@ -319,6 +319,36 @@ pub const DECISION_RETAIN_MS: i64 = 24 * 3600 * 1000;
 pub const SESSION_RETAIN_MS: i64 = 7 * 24 * 3600 * 1000;
 
 impl Service {
+    /// 제공자의 사용량 수집 실패를 기록한다(None이면 정상으로 돌아옴). 바뀌었을 때만 화면 버전을 올린다.
+    pub async fn set_usage_error(&self, provider: &str, error: Option<&str>) -> Result<()> {
+        let now = self.now();
+        let mut tx = crate::db::begin(&self.pool).await?;
+        let cur: Option<Option<String>> =
+            sqlx::query_scalar("SELECT usage_error FROM providers WHERE name = ?")
+                .bind(provider)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let error = error.map(|e| e.chars().take(200).collect::<String>());
+        // 행이 없으면 오류도 없는 것으로 본다
+        if cur.flatten() == error {
+            tx.commit().await?;
+            return Ok(());
+        }
+        sqlx::query(
+            "INSERT INTO providers (name, last_event_at, usage_error, usage_error_at) VALUES (?, ?, ?, ?) \
+             ON CONFLICT (name) DO UPDATE SET usage_error = excluded.usage_error, usage_error_at = excluded.usage_error_at",
+        )
+        .bind(provider)
+        .bind(now)
+        .bind(&error)
+        .bind(error.as_ref().map(|_| now))
+        .execute(&mut *tx)
+        .await?;
+        bump_version(&mut tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// 폰의 '확인함': 지시 대기 세션을 유휴로 돌려 지시 대기 수에서 뺀다.
     /// 다음 턴이 시작되면 다시 진행 중 → 턴을 마치면 다시 지시 대기가 된다.
     /// 지시 대기가 아니면 아무것도 하지 않는다. 없는 세션이면 NotFound.

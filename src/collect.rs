@@ -296,6 +296,20 @@ fn month_number(m: &str) -> Option<u32> {
 }
 
 /// Claude CLI로 /usage를 한 번 읽는다(모델 호출 없음). 출력은 `--output-format json`의 result.
+/// `/usage`에서 사용량을 못 찾았을 때 폰에 보일 이유. 출력 내용은 싣지 않는다.
+pub fn usage_failure_reason(v: &Value, text: &str, stderr: &[u8]) -> &'static str {
+    let err = String::from_utf8_lossy(stderr).to_lowercase();
+    let all = format!("{} {err}", text.to_lowercase());
+    let auth = ["login", "log in", "oauth", "unauthorized", "401", "expired", "authenticate"];
+    if auth.iter().any(|k| all.contains(k)) {
+        "Claude 로그인이 만료된 것 같아요. 맥에서 사용량용 Claude 설정 폴더로 다시 로그인하세요"
+    } else if v.is_null() {
+        "claude가 알 수 없는 출력을 냈어요(실행 오류)"
+    } else {
+        "사용량 문구 형식이 바뀌어 읽지 못했어요(notifier 업데이트 필요)"
+    }
+}
+
 pub async fn read_claude_usage(
     claude_bin: &Path,
     config_dir: &Path,
@@ -322,13 +336,13 @@ pub async fn read_claude_usage(
             .output(),
     )
     .await
-    .context("/usage 시간 초과")?
-    .context("claude 실행 실패")?;
-    let v: Value = serde_json::from_slice(&out.stdout).context("/usage 출력이 JSON이 아닙니다")?;
+    .map_err(|_| anyhow::anyhow!("맥에서 사용량 조회가 60초 안에 끝나지 않았어요"))?
+    .map_err(|e| anyhow::anyhow!("claude 실행 파일을 실행하지 못했어요({e})"))?;
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
     let text = v.get("result").and_then(Value::as_str).unwrap_or("");
     let windows = parse_claude_usage(text, Local::now());
     if windows.is_empty() {
-        anyhow::bail!("/usage 출력에서 사용량을 찾지 못했습니다(로그인 만료 또는 형식 변경)");
+        anyhow::bail!("{}", usage_failure_reason(&v, text, &out.stderr));
     }
     Ok(windows)
 }
@@ -699,6 +713,16 @@ mod tests {
         );
         assert_eq!(w.len(), 1);
         assert_eq!((w[0].name.as_str(), w[0].used_percent), ("five_hour", 0.0));
+    }
+
+    #[test]
+    fn usage_failure_reasons() {
+        let v = serde_json::json!({"result": "Please run /login · OAuth token expired"});
+        assert!(usage_failure_reason(&v, v["result"].as_str().unwrap(), b"").contains("로그인"));
+        assert!(usage_failure_reason(&Value::Null, "", b"Error: 401 Unauthorized").contains("로그인"));
+        assert!(usage_failure_reason(&Value::Null, "", b"").contains("알 수 없는 출력"));
+        let v = serde_json::json!({"result": "Usage dashboard moved"});
+        assert!(usage_failure_reason(&v, "Usage dashboard moved", b"").contains("형식"));
     }
 
     #[test]
