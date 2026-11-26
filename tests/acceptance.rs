@@ -1122,3 +1122,66 @@ async fn stale_sessions_are_swept() {
         "결정 대기 세션만 남음"
     );
 }
+
+#[tokio::test]
+async fn pairing_codes_burn_after_many_wrong_guesses() {
+    let h = harness().await;
+    let code = h.svc.create_pairing_code(600_000).await.unwrap();
+    for _ in 0..9 {
+        let e = h.svc.exchange_pairing_code("AAAAA-AAAAA", "폰").await.unwrap_err();
+        assert_eq!(conflict_code(e), "invalid_code");
+    }
+    let e = h.svc.exchange_pairing_code("AAAAA-AAAAA", "폰").await.unwrap_err();
+    assert_eq!(conflict_code(e), "too_many_attempts");
+    // 맞는 코드도 이미 무효
+    let e = h.svc.exchange_pairing_code(&code, "폰").await.unwrap_err();
+    assert_eq!(conflict_code(e), "invalid_code");
+    // 새로 만든 코드는 쓸 수 있다
+    let fresh = h.svc.create_pairing_code(600_000).await.unwrap();
+    assert!(h.svc.exchange_pairing_code(&fresh, "폰").await.is_ok());
+}
+
+#[tokio::test]
+async fn wrong_guesses_spread_over_time_do_not_burn() {
+    let h = harness().await;
+    let code = h.svc.create_pairing_code(3_600_000).await.unwrap();
+    for _ in 0..9 {
+        let _ = h.svc.exchange_pairing_code("AAAAA-AAAAA", "폰").await;
+    }
+    h.clock.advance(11 * 60_000);
+    let e = h.svc.exchange_pairing_code("AAAAA-AAAAA", "폰").await.unwrap_err();
+    assert_eq!(conflict_code(e), "invalid_code");
+    assert!(h.svc.exchange_pairing_code(&code, "폰").await.is_ok());
+}
+
+#[tokio::test]
+async fn old_decisions_and_sessions_are_purged() {
+    let h = harness().await;
+    h.start(CLAUDE, "s1").await;
+    let id = h.decide("s1", "r1", vec![q(QD, &["가", "나"])], None).await;
+    let v = version_of(&h, &id).await;
+    h.svc
+        .submit(None, &id, &submit_req("sub-purge-1", v, answers(&[(QD, "가")])))
+        .await
+        .unwrap();
+    h.svc.deliver_pending().await.unwrap();
+    // 하루 안에는 결과를 다시 볼 수 있다
+    h.clock.advance(23 * 3600 * 1000);
+    h.svc.purge_old_records().await.unwrap();
+    assert!(h.svc.decision_detail(&id).await.is_ok());
+    // 하루가 지나면 질문·답과 함께 지운다
+    h.clock.advance(2 * 3600 * 1000);
+    assert_eq!(h.svc.purge_old_records().await.unwrap(), 1);
+    assert!(matches!(
+        h.svc.decision_detail(&id).await,
+        Err(ServiceError::NotFound)
+    ));
+    // 끝난 세션은 일주일 뒤 지운다
+    h.send(ev(CLAUDE, "s1", EventKind::SessionEnded { outcome: SessionOutcome::Completed }))
+        .await;
+    h.clock.advance(6 * 24 * 3600 * 1000);
+    assert_eq!(h.svc.purge_old_records().await.unwrap(), 0);
+    h.clock.advance(2 * 24 * 3600 * 1000);
+    assert_eq!(h.svc.purge_old_records().await.unwrap(), 1);
+    assert!(h.svc.session_brief(CLAUDE, "s1").await.unwrap().is_none());
+}

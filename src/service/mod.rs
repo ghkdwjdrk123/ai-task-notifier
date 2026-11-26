@@ -331,6 +331,10 @@ pub struct SessionBrief {
 pub const SWEEP_ACTIVE_AFTER_MS: i64 = 3 * 3600 * 1000;
 /// 유휴로 이 시간 넘게 소식이 없으면 끝난 세션으로 보고 목록에서 뺀다.
 pub const SWEEP_IDLE_AFTER_MS: i64 = 24 * 3600 * 1000;
+/// 끝난 결정(질문·실행 내용·답)을 두는 기간.
+pub const DECISION_RETAIN_MS: i64 = 24 * 3600 * 1000;
+/// 끝난 세션(제목·상태)을 두는 기간.
+pub const SESSION_RETAIN_MS: i64 = 7 * 24 * 3600 * 1000;
 
 impl Service {
     /// 세션의 현재 상태·마지막 관측 시각·제목. 없으면 None.
@@ -370,6 +374,55 @@ impl Service {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// 지난 기록 정리(대화 내용을 오래 두지 않는다).
+    /// - 끝난 결정(반영·닫힘)은 `DECISION_RETAIN_MS` 뒤 질문·실행 내용·답과 함께 지운다.
+    /// - 끝난 세션(완료·중단·실패)은 남은 결정이 없으면 `SESSION_RETAIN_MS` 뒤 지운다.
+    /// - 다 쓴·만료된 등록 코드는 하루 뒤 지운다. 지운 결정·세션 수.
+    pub async fn purge_old_records(&self) -> Result<usize> {
+        let now = self.now();
+        let mut tx = crate::db::begin(&self.pool).await?;
+        let cutoff = now - DECISION_RETAIN_MS;
+        // 결정에 딸린 제출·발송 대기열을 먼저 지운다(외래 키)
+        sqlx::query(
+            "DELETE FROM submissions WHERE decision_id IN \
+             (SELECT id FROM decisions WHERE state IN ('applied','closed') AND updated_at < ?)",
+        )
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM push_outbox WHERE decision_id IN \
+             (SELECT id FROM decisions WHERE state IN ('applied','closed') AND updated_at < ?)",
+        )
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?;
+        let d = sqlx::query(
+            "DELETE FROM decisions WHERE state IN ('applied','closed') AND updated_at < ?",
+        )
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        let s = sqlx::query(
+            "DELETE FROM sessions WHERE state IN ('completed','interrupted','failed') AND updated_at < ? \
+             AND NOT EXISTS (SELECT 1 FROM decisions WHERE decisions.session_id = sessions.id)",
+        )
+        .bind(now - SESSION_RETAIN_MS)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        sqlx::query(
+            "DELETE FROM pairing_codes WHERE (used_at IS NOT NULL OR expires_at <= ?) AND created_at < ?",
+        )
+        .bind(now)
+        .bind(now - 24 * 3600 * 1000)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok((d + s) as usize)
     }
 
     /// 종료 신호를 놓친 세션 정리: 오래 조용한 진행·대기 세션은 유휴로, 오래된 유휴 세션은 완료로.

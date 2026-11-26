@@ -7,11 +7,11 @@
                  ◀─────────답──────────            ◀──────────답변───────────────────────── 누르면 답변 화면
 ```
 
-상시 알림 예: `진행 3 · 결정 대기 1` / `Claude 5시간 48% · 주간 4%  |  ChatGPT 5시간 12% · 주간 31%`
+상시 알림 예: `진행 3 · 결정 대기 1 · 지시 대기 2` / `Claude 5시간 48% · 주간 4%  |  ChatGPT 5시간 12% · 주간 31%`
 
 ## 상태
 
-**실제 Claude Code·Codex의 세션 수와 구독 사용량을 폰 상시 알림에 보여 줍니다.** 폰에서 보낸 답을 실제 세션에 넣는 기능은 아직입니다(데모 제공자로만 동작).
+**실제 Claude Code·Codex의 세션 상태(진행·결정 대기·지시 대기)와 구독 사용량을 폰 상시 알림에 보여 주고, Claude Code의 질문·실행 권한에는 폰에서 답할 수 있습니다**(맥 화면과 먼저 답한 쪽이 쓰임). Codex는 관측만 합니다.
 
 | 단계 | 내용 | 상태 |
 |---|---|---|
@@ -20,8 +20,9 @@
 | 2a | 상시 알림 Android 앱, 사용량·실시간 스트림·앱 인증 | 완료(실기 설치 전) |
 | 2b | 실제 데이터 수집: Claude Code 세션(훅)·Claude 사용량(`/usage`)·Codex 세션·사용량(기록 파일) | 완료(관측만) |
 | 2c | 폰에서 보낸 답을 실제 Claude Code 세션에 넣기(질문·실행 권한) | 완료(Codex는 관측만) |
-| 3 | Codex 연동, 동시 작업 | 예정 |
-| 4 | 외부 접속·알림 안정성 측정 | 예정 |
+| 2d | '지시 대기' 상태(턴을 마치고 다음 지시를 기다리는 세션) | 완료 |
+| 3 | Codex 연동, 동시 작업 | 관측만 완료(Codex에 폰으로 답하는 공식 경로 없음) |
+| 4 | 외부 접속·알림 안정성 측정, 기록 정리 | 기록 정리·등록 시도 제한 완료, 실기 측정 예정 |
 
 자세한 요구사항, 상태 모델, 인수 테스트, 검증 결과는 [docs/design.md](docs/design.md)에 있습니다.
 
@@ -68,11 +69,13 @@ notifier serve --claude-usage ~/.config/<전용 폴더>/claude --claude-bin ~/.l
 | 경로 | 내용 |
 |---|---|
 | `src/service/` | 상태 계산·전이: 제공자 이벤트(`events.rs`), 답 접수·전달·반영 확인(`answers.rs`), 기기·등록(`devices.rs`), 푸시 대기열(`outbox.rs`), 스냅샷·상세(`snapshot.rs`) |
-| `src/api.rs` | 폰(PWA)용 HTTP API |
-| `src/provider.rs`, `src/push.rs` | 제공자 연결·푸시 발송 계약과 시험용 가짜 구현 |
+| `src/api.rs` | 폰 앱용 HTTP API(실시간 스트림 포함) |
+| `src/collect.rs` | 실제 데이터 수집: Claude Code 훅, Claude `/usage`, Codex 기록 파일 |
+| `src/claude_answer.rs` | 폰 답을 Claude Code 세션에 넣기: `PermissionRequest` 훅 우편함과 서버 어댑터 |
+| `src/provider.rs`, `src/push.rs` | 제공자 연결·푸시 발송 계약과 시험용 가짜 구현(푸시는 0단계 기록, 앱은 쓰지 않음) |
 | `android/` | Android 앱(Kotlin, 외부 라이브러리 없음): 상시 알림 서비스, 등록·대시보드·답변 화면 |
 | `migrations/` | SQLite 스키마 |
-| `tests/` | 인수 테스트(`acceptance.rs`, 시험 이름의 tNN = 설계 문서 테스트 ID)와 API 시험 |
+| `tests/` | 인수 테스트(`acceptance.rs`, 시험 이름의 tNN = 설계 문서 테스트 ID), API 시험, 수집(`collect.rs`)·답 전달(`claude_answer.rs`) 시험 |
 | `docs/design.md` | 설계 문서(요구사항 F01~F14, 상태 모델, 인수 테스트, 0단계 결과) |
 | `spikes/claude-question/` | 0단계 검증 스크립트: 질문을 가로채 답을 넣는 최소 MCP 서버(`ask_mcp.py`), PreToolUse 훅(`hook_ask.py`) |
 | `spikes/webpush/` | 0단계 검증용 Web Push 서버(`server.mjs`, Node 내장 crypto로 RFC 8291·8292 직접 구현)와 자체 시험(`selftest.mjs`) |

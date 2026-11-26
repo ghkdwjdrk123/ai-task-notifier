@@ -415,6 +415,9 @@ async fn run_worker(svc: Arc<Service>, wake: Arc<Notify>) {
             if let Err(e) = svc.sweep_sessions().await {
                 tracing::error!("세션 정리 실패: {e:#}");
             }
+            if let Err(e) = svc.purge_old_records().await {
+                tracing::error!("지난 기록 정리 실패: {e:#}");
+            }
             // 사라진 훅이 남긴 기다림·닫다 끊긴 결정 정리
             if let Err(e) = claude_answer::sweep_stale_waits(&svc).await {
                 tracing::error!("훅 기다림 정리 실패: {e:#}");

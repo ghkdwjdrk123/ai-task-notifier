@@ -8,7 +8,7 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use sqlx::Row;
+use sqlx::{Row, SqliteConnection};
 use sqlx::sqlite::SqliteRow;
 
 /// 읽기 쉬운 문자만(0·O·1·I·L·U 제외).
@@ -123,6 +123,48 @@ fn b64url_len(s: &str) -> Option<usize> {
         .map(|v| v.len())
 }
 
+/// 등록 코드 맞히기 방지: 10분 안에 틀린 코드가 이만큼이면 쓰지 않은 코드를 모두 무효로 한다.
+const PAIR_FAIL_LIMIT: i64 = 10;
+const PAIR_FAIL_WINDOW_MS: i64 = 10 * 60_000;
+
+/// 틀린 코드 하나를 센다. 한도에 닿아 남은 코드를 무효로 했으면 true.
+async fn record_pairing_failure(conn: &mut SqliteConnection, now: i64) -> Result<bool> {
+    let since: Option<i64> =
+        sqlx::query_scalar("SELECT value FROM meta WHERE key = 'pair_fail_since'")
+            .fetch_optional(&mut *conn)
+            .await?;
+    let count: i64 = sqlx::query_scalar("SELECT value FROM meta WHERE key = 'pair_fail_count'")
+        .fetch_optional(&mut *conn)
+        .await?
+        .unwrap_or(0);
+    let (since, count) = match since {
+        Some(s) if now - s <= PAIR_FAIL_WINDOW_MS => (s, count + 1),
+        _ => (now, 1),
+    };
+    for (k, v) in [("pair_fail_since", since), ("pair_fail_count", count)] {
+        sqlx::query(
+            "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(k)
+        .bind(v)
+        .execute(&mut *conn)
+        .await?;
+    }
+    if count < PAIR_FAIL_LIMIT {
+        return Ok(false);
+    }
+    sqlx::query("UPDATE pairing_codes SET expires_at = ? WHERE used_at IS NULL AND expires_at > ?")
+        .bind(now)
+        .bind(now)
+        .execute(&mut *conn)
+        .await?;
+    // 새로 만든 코드는 다시 쓸 수 있게 창을 비운다
+    sqlx::query("DELETE FROM meta WHERE key IN ('pair_fail_since','pair_fail_count')")
+        .execute(&mut *conn)
+        .await?;
+    Ok(true)
+}
+
 impl Service {
     /// 1회용 등록 코드를 만든다. 원문은 이 반환값으로만 볼 수 있다.
     pub async fn create_pairing_code(&self, ttl_ms: i64) -> Result<String> {
@@ -162,10 +204,19 @@ impl Service {
         .fetch_optional(&mut *tx)
         .await?;
         if found.is_none() {
-            return Err(conflict(
-                "invalid_code",
-                "등록 코드가 틀렸거나 만료됐거나 이미 쓰였습니다",
-            ));
+            let burned = record_pairing_failure(&mut tx, now).await?;
+            tx.commit().await?;
+            return Err(if burned {
+                conflict(
+                    "too_many_attempts",
+                    "틀린 코드가 너무 많아 남은 등록 코드를 모두 무효로 했습니다. 맥에서 새 코드를 만드세요",
+                )
+            } else {
+                conflict(
+                    "invalid_code",
+                    "등록 코드가 틀렸거나 만료됐거나 이미 쓰였습니다",
+                )
+            });
         }
         let id = new_id();
         let token = random_token()?;
