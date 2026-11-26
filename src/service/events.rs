@@ -1,7 +1,7 @@
 //! 제공자 이벤트 반영.
 
 use super::{
-    DecisionRow, PUSH_MAX_TTL_MS, Service, ServiceError, bump_version, decision_select,
+    DecisionRow, Service, ServiceError, bump_version, decision_select,
     finish_decision, new_id,
 };
 use crate::model::{
@@ -409,26 +409,7 @@ impl Service {
                     > 0;
                 if inserted {
                     set_session(&mut tx, &sid, SessionState::WaitingDecision, now).await?;
-                    let version = bump_version(&mut tx).await?;
-                    // 이미 마감이 지난 요청이면 푸시하지 않는다(다음 만료 처리에서 닫힘)
-                    let expires = deadline_at
-                        .unwrap_or(i64::MAX)
-                        .min(now.saturating_add(PUSH_MAX_TTL_MS));
-                    if expires > now {
-                        sqlx::query(
-                            "INSERT INTO push_outbox (device_id, kind, decision_id, snapshot_version, expires_at, \
-                             state, attempts, next_attempt_at, created_at) \
-                             SELECT d.id, 'decision', ?, ?, ?, 'pending', 0, ?, ? FROM devices d \
-                             JOIN push_subscriptions p ON p.device_id = d.id WHERE d.revoked_at IS NULL",
-                        )
-                        .bind(&id)
-                        .bind(version)
-                        .bind(expires)
-                        .bind(now)
-                        .bind(now)
-                        .execute(&mut *tx)
-                        .await?;
-                    }
+                    bump_version(&mut tx).await?;
                     new_decision = Some(id);
                     tx.commit().await?;
                     return Ok(IngestResult {

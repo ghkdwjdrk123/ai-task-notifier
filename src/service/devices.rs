@@ -2,9 +2,7 @@
 
 use super::{Service, ServiceError, conflict, new_id};
 use crate::clock::to_datetime;
-use crate::push::PushSubscription;
-use anyhow::{Context, Result};
-use base64::Engine;
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -22,7 +20,6 @@ pub struct DeviceView {
     pub created_at: DateTime<Utc>,
     pub last_seen_at: Option<DateTime<Utc>>,
     pub revoked: bool,
-    pub has_push: bool,
 }
 
 fn device_from_row(r: &SqliteRow) -> Result<DeviceView> {
@@ -34,14 +31,12 @@ fn device_from_row(r: &SqliteRow) -> Result<DeviceView> {
             .try_get::<Option<i64>, _>("last_seen_at")?
             .map(to_datetime),
         revoked: r.try_get::<Option<i64>, _>("revoked_at")?.is_some(),
-        has_push: r.try_get::<i64, _>("has_push")? != 0,
     })
 }
 
 macro_rules! device_select {
     () => {
-        "SELECT d.id, d.name, d.created_at, d.last_seen_at, d.revoked_at, \
-         EXISTS (SELECT 1 FROM push_subscriptions p WHERE p.device_id = d.id) AS has_push FROM devices d"
+        "SELECT d.id, d.name, d.created_at, d.last_seen_at, d.revoked_at FROM devices d"
     };
 }
 
@@ -81,46 +76,6 @@ fn random_token() -> Result<String> {
     let mut b = [0u8; 32];
     getrandom::fill(&mut b).map_err(|e| anyhow::anyhow!("난수 생성 실패: {e}"))?;
     Ok(hex::encode(b))
-}
-
-/// 브라우저 푸시 서비스 호스트(정확히 같거나 하위 도메인). 이 밖의 주소로는 맥이 요청을 보내지 않는다
-/// (기기 쿠키가 탈취돼도 맥을 내부망 요청 발판으로 쓰지 못하게).
-const PUSH_HOSTS: &[&str] = &[
-    "fcm.googleapis.com",        // Chrome·Edge(Android 포함)·삼성 인터넷
-    "push.services.mozilla.com", // Firefox
-    "web.push.apple.com",        // Safari
-    "notify.windows.com",        // 구형 Edge
-];
-
-pub(crate) fn allowed_push_endpoint(endpoint: &str) -> bool {
-    if endpoint.len() > 2048
-        || endpoint
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control())
-    {
-        return false;
-    }
-    let Some(rest) = endpoint.strip_prefix("https://") else {
-        return false;
-    };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    // 사용자 정보(@)·포트(:)가 붙은 주소는 받지 않는다
-    if host.is_empty() || host.contains(['@', ':']) {
-        return false;
-    }
-    let host = host.to_ascii_lowercase();
-    PUSH_HOSTS
-        .iter()
-        .any(|h| host == *h || host.ends_with(&format!(".{h}")))
-}
-
-/// base64url(패딩 선택) 디코드 후 길이 검사.
-fn b64url_len(s: &str) -> Option<usize> {
-    let t = s.trim_end_matches('=');
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(t)
-        .ok()
-        .map(|v| v.len())
 }
 
 /// 등록 코드 맞히기 방지: 10분 안에 틀린 코드가 이만큼이면 쓰지 않은 코드를 모두 무효로 한다.
@@ -280,7 +235,7 @@ impl Service {
         rows.iter().map(device_from_row).collect()
     }
 
-    /// 기기 연결 해제: 이후 조회·답변을 거절하고, 구독과 보내지 않은 푸시를 지운다(T02).
+    /// 기기 연결 해제: 이후 조회·답변을 거절한다(T02).
     pub async fn revoke_device(&self, device_id: &str) -> Result<bool> {
         let now = self.now();
         let mut tx = crate::db::begin(&self.pool).await?;
@@ -291,66 +246,8 @@ impl Service {
                 .execute(&mut *tx)
                 .await?
                 .rows_affected();
-        sqlx::query("DELETE FROM push_subscriptions WHERE device_id = ?")
-            .bind(device_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(
-            "UPDATE push_outbox SET state = 'cancelled' WHERE device_id = ? AND state = 'pending'",
-        )
-        .bind(device_id)
-        .execute(&mut *tx)
-        .await?;
         tx.commit().await?;
         Ok(n > 0)
-    }
-
-    /// 현재 기기의 푸시 구독을 교체한다. 같은 endpoint가 다른 기기에 있으면 옮긴다(T29).
-    pub async fn set_push_subscription(
-        &self,
-        device_id: &str,
-        sub: &PushSubscription,
-    ) -> Result<(), ServiceError> {
-        if !allowed_push_endpoint(&sub.endpoint) {
-            return Err(ServiceError::Invalid(
-                "푸시 endpoint는 알려진 브라우저 푸시 서비스의 https 주소여야 합니다".into(),
-            ));
-        }
-        if b64url_len(&sub.keys.p256dh) != Some(65) || b64url_len(&sub.keys.auth) != Some(16) {
-            return Err(ServiceError::Invalid(
-                "푸시 키 형식이 올바르지 않습니다".into(),
-            ));
-        }
-        let now = self.now();
-        let mut tx = crate::db::begin(&self.pool).await?;
-        sqlx::query("DELETE FROM push_subscriptions WHERE endpoint = ? AND device_id <> ?")
-            .bind(&sub.endpoint)
-            .bind(device_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(
-            "INSERT INTO push_subscriptions (device_id, endpoint, p256dh, auth, updated_at) VALUES (?, ?, ?, ?, ?) \
-             ON CONFLICT (device_id) DO UPDATE SET endpoint = excluded.endpoint, p256dh = excluded.p256dh, \
-             auth = excluded.auth, updated_at = excluded.updated_at",
-        )
-        .bind(device_id)
-        .bind(&sub.endpoint)
-        .bind(&sub.keys.p256dh)
-        .bind(&sub.keys.auth)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .context("푸시 구독 저장 실패")?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    pub async fn delete_push_subscription(&self, device_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM push_subscriptions WHERE device_id = ?")
-            .bind(device_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
     }
 }
 
@@ -369,27 +266,5 @@ mod tests {
                 .all(|b| CODE_ALPHABET.contains(&b))
         );
         assert_eq!(normalize_code(" abcde-fghjk "), "ABCDEFGHJK");
-    }
-
-    #[test]
-    fn push_endpoint_allowlist() {
-        for ok in [
-            "https://fcm.googleapis.com/fcm/send/abc",
-            "https://updates.push.services.mozilla.com/wpush/v2/x",
-            "https://web.push.apple.com/QG",
-        ] {
-            assert!(allowed_push_endpoint(ok), "{ok}");
-        }
-        for bad in [
-            "http://fcm.googleapis.com/fcm/send/abc",
-            "https://127.0.0.1/x",
-            "https://fcm.googleapis.com:8443/x",
-            "https://evil@fcm.googleapis.com/x",
-            "https://fcm.googleapis.com.evil.example/x",
-            "https://evilfcm.googleapis.com.example/x",
-            "https://mac.tailnet.ts.net/x",
-        ] {
-            assert!(!allowed_push_endpoint(bad), "{bad}");
-        }
     }
 }

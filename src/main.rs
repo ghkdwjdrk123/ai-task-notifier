@@ -201,7 +201,7 @@ async fn main() -> Result<()> {
         Cmd::Devices => {
             for d in svc.list_devices().await? {
                 println!(
-                    "{}  {}  등록 {}  마지막 {}  {}{}",
+                    "{}  {}  등록 {}  마지막 {}  {}",
                     d.id,
                     d.name,
                     d.created_at
@@ -214,7 +214,6 @@ async fn main() -> Result<()> {
                             .to_string())
                         .unwrap_or_else(|| "-".into()),
                     if d.revoked { "해제됨" } else { "사용 중" },
-                    if d.has_push { " · 푸시" } else { "" },
                 );
             }
         }

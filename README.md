@@ -68,11 +68,11 @@ notifier serve --claude-usage ~/.config/<전용 폴더>/claude --claude-bin ~/.l
 
 | 경로 | 내용 |
 |---|---|
-| `src/service/` | 상태 계산·전이: 제공자 이벤트(`events.rs`), 답 접수·전달·반영 확인(`answers.rs`), 기기·등록(`devices.rs`), 푸시 대기열(`outbox.rs`), 스냅샷·상세(`snapshot.rs`) |
+| `src/service/` | 상태 계산·전이: 제공자 이벤트(`events.rs`), 답 접수·전달·반영 확인(`answers.rs`), 기기·등록(`devices.rs`), 스냅샷·상세(`snapshot.rs`) |
 | `src/api.rs` | 폰 앱용 HTTP API(실시간 스트림 포함) |
 | `src/collect.rs` | 실제 데이터 수집: Claude Code 훅, Claude `/usage`, Codex 기록 파일 |
 | `src/claude_answer.rs` | 폰 답을 Claude Code 세션에 넣기: `PermissionRequest` 훅 우편함과 서버 어댑터 |
-| `src/provider.rs`, `src/push.rs` | 제공자 연결·푸시 발송 계약과 시험용 가짜 구현(푸시는 0단계 기록, 앱은 쓰지 않음) |
+| `src/provider.rs` | 제공자 연결 계약과 시험용 가짜 제공자 |
 | `android/` | Android 앱(Kotlin, 외부 라이브러리 없음): 상시 알림 서비스, 등록·대시보드·답변 화면 |
 | `migrations/` | SQLite 스키마 |
 | `tests/` | 인수 테스트(`acceptance.rs`, 시험 이름의 tNN = 설계 문서 테스트 ID), API 시험, 수집(`collect.rs`)·답 전달(`claude_answer.rs`) 시험 |
@@ -155,7 +155,6 @@ echo '{"provider":"demo","session_id":"m1","event_id":"e1","type":"turn_started"
 | `DELETE /v1/device` | 이 기기 등록 해제(토큰 무효) |
 | `GET /v1/app/latest` | 앱 업데이트 폴더의 최신 버전 `{version_code, version_name, size, sha256}`(없으면 404 `no_app`) |
 | `GET /v1/app/apk` | 최신 APK(`application/vnd.android.package-archive`, `x-apk-sha256`) |
-| `PUT`·`DELETE /v1/device/push-subscription` | 브라우저 Web Push 구독(현재 앱은 쓰지 않음) |
 
 인증: 앱은 등록 때 `token_in_body: true`로 토큰을 받아 `Authorization: Bearer`로 보냅니다. 브라우저는 쿠키를 쓰며, 쿠키를 실은 쓰기 요청은 `Origin`이 `--allowed-origin` 중 하나여야 합니다. 오류는 `{error, message}` JSON입니다.
 

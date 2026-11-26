@@ -9,14 +9,13 @@
 //!   붙이므로 쿠키를 이용한 교차 사이트 요청은 막힌다.
 //! - 모든 응답은 `Cache-Control: no-store`.
 
-use crate::push::PushSubscription;
 use crate::service::{DeviceView, Service, ServiceError, SubmitRequest};
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header, request::Parts};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
@@ -59,10 +58,6 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/device", delete(revoke_self))
         .route("/v1/app/latest", get(app_latest))
         .route("/v1/app/apk", get(app_apk))
-        .route(
-            "/v1/device/push-subscription",
-            put(put_push_subscription).delete(delete_push_subscription),
-        )
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
@@ -356,29 +351,12 @@ async fn get_submission(
     Ok(Json(st.svc.get_submission(&id, &sid).await?).into_response())
 }
 
-async fn put_push_subscription(
-    State(st): State<AppState>,
-    AuthDevice(dev): AuthDevice,
-    Json(sub): Json<PushSubscription>,
-) -> Result<StatusCode, ApiError> {
-    st.svc.set_push_subscription(&dev.id, &sub).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 /// 앱의 '이 폰 등록 해제': 서버에서도 이 기기의 토큰을 무효로 한다.
 async fn revoke_self(
     State(st): State<AppState>,
     AuthDevice(dev): AuthDevice,
 ) -> Result<StatusCode, ApiError> {
     st.svc.revoke_device(&dev.id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn delete_push_subscription(
-    State(st): State<AppState>,
-    AuthDevice(dev): AuthDevice,
-) -> Result<StatusCode, ApiError> {
-    st.svc.delete_push_subscription(&dev.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

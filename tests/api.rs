@@ -263,39 +263,20 @@ async fn full_answer_flow_over_http() {
 }
 
 #[tokio::test]
-async fn push_subscription_and_revocation() {
+async fn revoked_device_is_rejected() {
     let h = harness().await;
     let app = app(&h);
     let token = paired(&h, &app).await;
-    let sub = serde_json::to_value(subscription("phone")).unwrap();
-    let (st, _, _) = call(
-        &app,
-        "PUT",
-        "/v1/device/push-subscription",
-        Some(&token),
-        Some(ORIGIN),
-        Some(sub),
-    )
-    .await;
-    assert_eq!(st, StatusCode::NO_CONTENT);
-    let bad =
-        json!({"endpoint": "http://insecure.example/x", "keys": {"p256dh": "a", "auth": "b"}});
-    let (st, _, _) = call(
-        &app,
-        "PUT",
-        "/v1/device/push-subscription",
-        Some(&token),
-        Some(ORIGIN),
-        Some(bad),
-    )
-    .await;
-    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    let (st, _, _) = call(&app, "GET", "/v1/snapshot", Some(&token), None, None).await;
+    assert_eq!(st, StatusCode::OK);
     let dev = h.svc.list_devices().await.unwrap().remove(0);
-    assert!(dev.has_push);
     // 맥에서 해제하면 같은 쿠키로 더는 못 들어온다(T02)
     h.svc.revoke_device(&dev.id).await.unwrap();
     let (st, _, _) = call(&app, "GET", "/v1/snapshot", Some(&token), None, None).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
+    // 푸시 구독 API는 없앴다
+    let (st, _, _) = call(&app, "PUT", "/v1/device/push-subscription", None, None, None).await;
+    assert!(st == StatusCode::NOT_FOUND || st == StatusCode::METHOD_NOT_ALLOWED);
 }
 
 // ---------- Android 앱 경로 ----------

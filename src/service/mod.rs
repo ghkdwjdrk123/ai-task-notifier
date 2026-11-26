@@ -9,13 +9,11 @@
 mod answers;
 mod devices;
 mod events;
-mod outbox;
 mod snapshot;
 
 pub use answers::{SubmissionView, SubmitRequest};
 pub use devices::DeviceView;
 pub use events::IngestResult;
-pub use outbox::OutboxStats;
 pub use snapshot::{
     DecisionDetail, DecisionSummary, ProviderHealth, SessionView, Snapshot, UsageView,
 };
@@ -33,8 +31,6 @@ use std::time::Duration;
 /// 제공자 이벤트가 이 시간(밀리초)보다 오래 없으면 '갱신 지연'으로 본다.
 /// 수집기가 사용량을 5분마다, Codex 감시가 1분마다 신호를 보내므로 15분.
 pub const STALE_AFTER_MS: i64 = 15 * 60_000;
-/// 결정 푸시의 최대 유효 시간(마감이 없을 때).
-pub const PUSH_MAX_TTL_MS: i64 = 24 * 3600 * 1000;
 pub const DEFAULT_PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_CONFIRM_GIVE_UP_MS: i64 = 3600 * 1000;
 
@@ -250,7 +246,6 @@ pub(crate) async fn finish_decision(
         .bind(&d.id)
         .execute(&mut *conn)
         .await?;
-    cancel_outbox_for_decision(conn, &d.id).await?;
     // 답이 반영되거나 요청이 철회·만료되면 원본 작업은 이어진다(설계 1.4).
     // 같은 세션에 다른 결정이 남아 있으면 계속 결정 대기다. 세션 종료·요청 소멸은 세션 상태를 따로 정한다.
     if !matches!(reason, CloseReason::SessionEnded | CloseReason::Gone) {
@@ -270,19 +265,6 @@ pub(crate) async fn finish_decision(
                 .await?;
         }
     }
-    Ok(())
-}
-
-pub(crate) async fn cancel_outbox_for_decision(
-    conn: &mut SqliteConnection,
-    decision_id: &str,
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE push_outbox SET state = 'cancelled' WHERE decision_id = ? AND state = 'pending'",
-    )
-    .bind(decision_id)
-    .execute(&mut *conn)
-    .await?;
     Ok(())
 }
 
@@ -384,16 +366,9 @@ impl Service {
         let now = self.now();
         let mut tx = crate::db::begin(&self.pool).await?;
         let cutoff = now - DECISION_RETAIN_MS;
-        // 결정에 딸린 제출·발송 대기열을 먼저 지운다(외래 키)
+        // 결정에 딸린 제출을 먼저 지운다(외래 키)
         sqlx::query(
             "DELETE FROM submissions WHERE decision_id IN \
-             (SELECT id FROM decisions WHERE state IN ('applied','closed') AND updated_at < ?)",
-        )
-        .bind(cutoff)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "DELETE FROM push_outbox WHERE decision_id IN \
              (SELECT id FROM decisions WHERE state IN ('applied','closed') AND updated_at < ?)",
         )
         .bind(cutoff)

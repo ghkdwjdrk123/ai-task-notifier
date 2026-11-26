@@ -7,7 +7,6 @@ use ai_task_notifier::model::{
     AnswerValue, Answers, CloseReason, DecisionState, DeliveryOutcome, EventKind, RequestStatus,
     SessionOutcome, SessionState, SubmissionState,
 };
-use ai_task_notifier::push::PushOutcome;
 use ai_task_notifier::service::{ServiceError, SubmitRequest};
 use common::*;
 
@@ -69,33 +68,17 @@ async fn t01_pairing_code_is_single_use() {
 }
 
 #[tokio::test]
-async fn t02_revoked_device_loses_access_and_pending_push() {
+async fn t02_revoked_device_loses_access() {
     let h = harness().await;
-    let (dev, token) = h.device_with_push("갤럭시").await;
-    h.start(CLAUDE, "s1").await;
-    h.decide(
-        "s1",
-        "r1",
-        vec![q(QD, &["전체 중단", "중복 행만 건너뛰기"])],
-        None,
-    )
-    .await;
-    assert_eq!(h.outbox_states().await, vec!["pending"]);
-
+    let (dev, token) = h.device("갤럭시").await;
+    assert!(h.svc.authenticate(&token).await.unwrap().is_some());
     assert!(h.svc.revoke_device(&dev).await.unwrap());
     assert!(
         h.svc.authenticate(&token).await.unwrap().is_none(),
         "해제 후 인증 거절"
     );
-    let stats = h.svc.process_push_outbox(&h.push, 10).await.unwrap();
-    assert_eq!(stats.sent, 0);
-    assert!(
-        h.push.sent().is_empty(),
-        "해제한 기기로 푸시가 나가면 안 됨"
-    );
-    assert_eq!(h.outbox_states().await, vec!["cancelled"]);
     let devices = h.svc.list_devices().await.unwrap();
-    assert!(devices[0].revoked && !devices[0].has_push);
+    assert!(devices[0].revoked);
 }
 
 // ---------- F02·F03 세션 수 ----------
@@ -117,7 +100,6 @@ async fn t03_top_level_sessions_counted_once() {
 #[tokio::test]
 async fn t04_completed_interrupted_failed_reduce_running() {
     let h = harness().await;
-    let _dev = h.device_with_push("폰").await;
     for s in ["a", "b", "c"] {
         h.start(CLAUDE, s).await;
     }
@@ -132,18 +114,15 @@ async fn t04_completed_interrupted_failed_reduce_running() {
         seen.push(h.counts().await.0);
     }
     assert_eq!(seen, vec![3, 2, 1, 0]);
-    assert!(h.outbox_states().await.is_empty(), "결정 푸시 없음");
 }
 
 #[tokio::test]
 async fn t05_turn_end_with_question_mark_is_not_a_decision() {
     let h = harness().await;
-    let _dev = h.device_with_push("폰").await;
     h.start(CLAUDE, "s1").await;
     // 일반 답변에 물음표가 있어도 이벤트는 턴 종료일 뿐이다
     h.send(ev(CLAUDE, "s1", EventKind::TurnEnded)).await;
     assert_eq!(h.counts().await, (0, 0));
-    assert!(h.outbox_states().await.is_empty());
     // 일하던 세션이 턴을 마치면 '지시 대기'(사용자가 이어서 지시해야 함)
     let snap = h.svc.snapshot().await.unwrap();
     assert_eq!(snap.sessions[0].state, SessionState::AwaitingInput);
@@ -210,9 +189,8 @@ async fn t06_permission_wait_is_not_a_project_decision() {
 }
 
 #[tokio::test]
-async fn t07_count_changes_do_not_create_decision_pushes() {
+async fn t07_count_changes_bump_snapshot_version() {
     let h = harness().await;
-    let _dev = h.device_with_push("폰").await;
     let v0 = h.svc.snapshot().await.unwrap().version;
     h.start(CLAUDE, "a").await;
     h.start(CLAUDE, "b").await;
@@ -222,18 +200,13 @@ async fn t07_count_changes_do_not_create_decision_pushes() {
     let snap = h.svc.snapshot().await.unwrap();
     assert_eq!((snap.running, snap.waiting_decisions), (1, 0));
     assert!(snap.version > v0, "숫자가 바뀌면 스냅샷 버전이 오른다");
-    assert!(
-        h.outbox_states().await.is_empty(),
-        "숫자 변화로 배너·진동을 만들지 않음"
-    );
 }
 
 // ---------- F04·F05 결정 ----------
 
 #[tokio::test]
-async fn t08_decision_request_moves_session_and_queues_one_push() {
+async fn t08_decision_request_moves_session() {
     let h = harness().await;
-    let (_d1, _) = h.device_with_push("폰1").await;
     h.start(CLAUDE, "s1").await;
     let id = h
         .decide(
@@ -244,28 +217,14 @@ async fn t08_decision_request_moves_session_and_queues_one_push() {
         )
         .await;
     assert_eq!(h.counts().await, (0, 1));
-    let stats = h.svc.process_push_outbox(&h.push, 10).await.unwrap();
-    assert_eq!(stats.sent, 1);
-    let sent = h.push.sent();
-    assert_eq!(sent[0].payload["type"], "decision");
-    assert_eq!(sent[0].payload["decision_id"], id.as_str());
-    // T30: 푸시 본문은 정확히 유형·불투명 ID·버전뿐이다(질문·작업명 없음)
-    let keys: Vec<&String> = sent[0].payload.as_object().unwrap().keys().collect();
-    let mut keys: Vec<&str> = keys.into_iter().map(String::as_str).collect();
-    keys.sort();
-    assert_eq!(keys, vec!["decision_id", "type", "v"]);
-    // 다시 처리해도 또 보내지 않는다
-    assert_eq!(
-        h.svc.process_push_outbox(&h.push, 10).await.unwrap().sent,
-        0
-    );
-    assert_eq!(h.svc.snapshot().await.unwrap().decisions.len(), 1);
+    let snap = h.svc.snapshot().await.unwrap();
+    assert_eq!(snap.decisions.len(), 1);
+    assert_eq!(snap.decisions[0].id, id);
 }
 
 #[tokio::test]
 async fn t09_redelivered_request_is_deduplicated() {
     let h = harness().await;
-    let _dev = h.device_with_push("폰").await;
     h.start(CLAUDE, "s1").await;
     let e = decision_event("s1", "r1", vec![q(QD, &["가", "나"])], None);
     let first = h.svc.ingest(&e).await.unwrap();
@@ -287,7 +246,6 @@ async fn t09_redelivered_request_is_deduplicated() {
     let snap = h.svc.snapshot().await.unwrap();
     assert_eq!(snap.waiting_decisions, 1);
     assert_eq!(snap.decisions[0].id, first.new_decision.unwrap());
-    assert_eq!(h.outbox_states().await.len(), 1, "배너도 한 건");
 }
 
 #[tokio::test]
@@ -543,7 +501,6 @@ async fn t18_not_applied_returns_to_open_and_allows_retry() {
 #[tokio::test]
 async fn t19_deadline_boundary_rejects_and_clears() {
     let h = harness().await;
-    let _dev = h.device_with_push("폰").await;
     h.start(CLAUDE, "s1").await;
     let deadline = T0 + 60_000;
     let id = h
@@ -574,12 +531,6 @@ async fn t19_deadline_boundary_rejects_and_clears() {
     assert_eq!(d.closed_reason, Some(CloseReason::Expired));
     assert!(!d.answerable);
     assert_eq!(h.counts().await.1, 0, "대기 수에 남지 않음");
-    // 오래된 푸시는 보내지 않는다
-    assert_eq!(
-        h.svc.process_push_outbox(&h.push, 10).await.unwrap().sent,
-        0
-    );
-    assert_eq!(h.outbox_states().await, vec!["cancelled"]);
 }
 
 #[tokio::test]
@@ -775,35 +726,6 @@ async fn restart_turns_in_flight_delivery_into_confirming() {
     h.provider.set_status("r1", RequestStatus::Open);
     h.svc.reconcile_confirming().await.unwrap();
     assert!(h.svc.decision_detail(&id).await.unwrap().answerable);
-}
-
-#[tokio::test]
-async fn push_gone_removes_subscription_and_retry_backs_off() {
-    let h = harness().await;
-    let (_a, _) = h.device_with_push("폰A").await;
-    let (_b, _) = h.device_with_push("폰B").await;
-    h.start(CLAUDE, "s1").await;
-    h.decide("s1", "r1", vec![q(QD, &["가", "나"])], None).await;
-    h.push.push_outcome(PushOutcome::Gone);
-    h.push.push_outcome(PushOutcome::Retry("503".into()));
-    let st = h.svc.process_push_outbox(&h.push, 10).await.unwrap();
-    assert_eq!((st.failed, st.retried), (1, 1));
-    let devices = h.svc.list_devices().await.unwrap();
-    assert_eq!(
-        devices.iter().filter(|d| d.has_push).count(),
-        1,
-        "만료 구독은 지움"
-    );
-    // 백오프 전에는 다시 보내지 않음
-    assert_eq!(
-        h.svc.process_push_outbox(&h.push, 10).await.unwrap().sent,
-        0
-    );
-    h.clock.advance(60_000);
-    assert_eq!(
-        h.svc.process_push_outbox(&h.push, 10).await.unwrap().sent,
-        1
-    );
 }
 
 #[tokio::test]
