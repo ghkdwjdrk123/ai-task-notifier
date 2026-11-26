@@ -319,6 +319,35 @@ pub const DECISION_RETAIN_MS: i64 = 24 * 3600 * 1000;
 pub const SESSION_RETAIN_MS: i64 = 7 * 24 * 3600 * 1000;
 
 impl Service {
+    /// 세션 이름을 바꾼다(앱에서 이름을 바꾼 경우). 바뀌었으면 true. 관측 시각은 건드리지 않는다.
+    pub async fn set_session_title(
+        &self,
+        provider: &str,
+        provider_session_id: &str,
+        title: &str,
+    ) -> Result<bool> {
+        let title: String = title.trim().chars().take(200).collect();
+        if title.is_empty() {
+            return Ok(false);
+        }
+        let mut tx = crate::db::begin(&self.pool).await?;
+        let n = sqlx::query(
+            "UPDATE sessions SET title = ? WHERE provider = ? AND provider_session_id = ? AND title <> ?",
+        )
+        .bind(&title)
+        .bind(provider)
+        .bind(provider_session_id)
+        .bind(&title)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if n > 0 {
+            bump_version(&mut tx).await?;
+        }
+        tx.commit().await?;
+        Ok(n > 0)
+    }
+
     /// 제공자의 사용량 수집 실패를 기록한다(None이면 정상으로 돌아옴). 바뀌었을 때만 화면 버전을 올린다.
     pub async fn set_usage_error(&self, provider: &str, error: Option<&str>) -> Result<()> {
         let now = self.now();

@@ -104,22 +104,56 @@ pub fn claude_hook_action(input: &Value) -> (Option<String>, HookAction) {
     (sid, action)
 }
 
-/// 처음 보는 세션이거나 제목이 아직 ID 조각이면 작업 폴더 이름을 제목으로 넣는 이벤트.
-fn title_event(brief: &Option<crate::service::SessionBrief>, sid: &str, cwd: &str) -> Option<EventKind> {
+/// 세션 기록 파일(`transcript_path`)의 마지막 제목. 앱 사이드바·`/rename`의 이름이
+/// `{"type":"custom-title","customTitle":…}` 줄로 계속 덧붙는다. 끝부분만 읽는다(64KB, 없으면 1MB).
+/// 제목만 꺼내고 대화 내용은 읽어 두지 않는다.
+pub fn transcript_title(path: &Path) -> Option<String> {
+    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        return None;
+    }
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    for window in [64u64 << 10, 1u64 << 20] {
+        let start = len.saturating_sub(window);
+        f.seek(SeekFrom::Start(start)).ok()?;
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::Read::take(&f, window), &mut buf).ok()?;
+        let text = String::from_utf8_lossy(&buf);
+        // 첫 줄은 중간부터 잘렸을 수 있다(파싱 실패로 걸러짐)
+        let found = text.lines().rev().filter(|l| l.contains("\"custom-title\"")).find_map(|l| {
+            let v: Value = serde_json::from_str(l).ok()?;
+            let t = v.get("customTitle")?.as_str()?.trim();
+            (!t.is_empty()).then(|| t.chars().take(200).collect::<String>())
+        });
+        if found.is_some() || start == 0 {
+            return found;
+        }
+    }
+    None
+}
+
+/// 처음 보는 세션이거나 제목이 아직 ID 조각이면 제목(기록의 제목, 없으면 작업 폴더 이름)을 넣는 이벤트.
+fn title_event(
+    brief: &Option<crate::service::SessionBrief>,
+    sid: &str,
+    cwd: &str,
+    want: Option<&str>,
+) -> Option<EventKind> {
     let placeholder: String = sid.chars().take(12).collect();
     let needs_title = brief.as_ref().is_none_or(|b| b.title == placeholder);
-    (needs_title && !cwd.is_empty()).then(|| EventKind::SessionStarted {
-        title: title_from_cwd(cwd),
-    })
+    let title = want.map(str::to_string).or_else(|| (!cwd.is_empty()).then(|| title_from_cwd(cwd)))?;
+    needs_title.then_some(EventKind::SessionStarted { title })
 }
 
 pub(crate) async fn title_event_if_needed(
     svc: &Service,
     sid: &str,
     cwd: &str,
+    transcript: Option<&str>,
 ) -> Result<Option<EventKind>> {
     let brief = svc.session_brief(CLAUDE, sid).await?;
-    Ok(title_event(&brief, sid, cwd))
+    let want = transcript.and_then(|p| transcript_title(Path::new(p)));
+    Ok(title_event(&brief, sid, cwd, want.as_deref()))
 }
 
 /// `notifier hook claude`: 표준 입력의 훅 JSON 하나를 반영한다.
@@ -133,6 +167,18 @@ pub async fn run_claude_hook(svc: &Service, input: &str) -> Result<()> {
     // 폰 답을 기다리던 창이 맥에서 먼저 처리됐는지 먼저 정리한다
     crate::claude_answer::close_answered_elsewhere(svc, &v).await?;
     let brief = svc.session_brief(CLAUDE, &sid).await?;
+    // 앱에 보이는 세션 이름: 세션 시작·프롬프트·턴 종료 때(또는 아직 제목이 없을 때) 기록 파일에서 읽는다
+    let ev_name = v.get("hook_event_name").and_then(Value::as_str).unwrap_or("");
+    let placeholder: String = sid.chars().take(12).collect();
+    let read_title = matches!(ev_name, "SessionStart" | "UserPromptSubmit" | "Stop" | "StopFailure")
+        || brief.as_ref().is_none_or(|b| b.title == placeholder);
+    let want_title = if read_title {
+        v.get("transcript_path")
+            .and_then(Value::as_str)
+            .and_then(|p| transcript_title(Path::new(p)))
+    } else {
+        None
+    };
     let mut kinds = match action {
         HookAction::Ignore => return Ok(()),
         HookAction::Ingest(k) => k,
@@ -147,8 +193,16 @@ pub async fn run_claude_hook(svc: &Service, input: &str) -> Result<()> {
             None => vec![EventKind::TurnStarted],
         },
     };
+    // SessionStart의 폴더 이름 대신 기록의 제목
+    if let Some(t) = &want_title {
+        for k in kinds.iter_mut() {
+            if let EventKind::SessionStarted { title } = k {
+                *title = t.clone();
+            }
+        }
+    }
     if !matches!(kinds.first(), Some(EventKind::SessionStarted { .. }))
-        && let Some(t) = title_event(&brief, &sid, cwd)
+        && let Some(t) = title_event(&brief, &sid, cwd, want_title.as_deref())
     {
         kinds.insert(0, t);
     }
@@ -160,6 +214,10 @@ pub async fn run_claude_hook(svc: &Service, input: &str) -> Result<()> {
             kind,
         };
         svc.ingest(&ev).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    // 앱에서 이름을 바꿨으면 따라간다
+    if let Some(t) = &want_title {
+        svc.set_session_title(CLAUDE, &sid, t).await?;
     }
     Ok(())
 }

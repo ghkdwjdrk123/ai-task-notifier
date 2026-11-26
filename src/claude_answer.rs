@@ -296,7 +296,8 @@ pub async fn run_permission_hook(
 
     let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
     let mut kinds = Vec::new();
-    if let Some(t) = crate::collect::title_event_if_needed(svc, sid, cwd).await? {
+    let transcript = input.get("transcript_path").and_then(Value::as_str);
+    if let Some(t) = crate::collect::title_event_if_needed(svc, sid, cwd, transcript).await? {
         kinds.push(t);
     }
     kinds.push(EventKind::DecisionRequested {

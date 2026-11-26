@@ -193,3 +193,32 @@ async fn codex_watcher_reads_new_lines_once() {
         .unwrap();
     assert!(!dump.contains("비밀"), "대화 내용은 저장하지 않음");
 }
+
+#[tokio::test]
+async fn session_title_follows_transcript_custom_title() {
+    let h = harness().await;
+    let dir = tempfile::tempdir().unwrap();
+    let t = dir.path().join("s.jsonl");
+    // 앞부분에 옛 이름, 끝부분에 바뀐 이름. 사이를 64KB 넘게 채워 끝부분만 읽는지 확인
+    let mut body = String::from("{\"type\":\"custom-title\",\"customTitle\":\"옛 이름\"}\n");
+    body.push_str(&format!("{{\"type\":\"user\",\"x\":\"{}\"}}\n", "a".repeat(70_000)));
+    body.push_str("{\"type\":\"custom-title\",\"customTitle\":\"P0b 4~6단계\"}\n{\"type\":\"assistant\"}\n");
+    std::fs::write(&t, body).unwrap();
+    assert_eq!(collect::transcript_title(&t).as_deref(), Some("P0b 4~6단계"));
+    let tp = t.to_str().unwrap();
+    // 폴더 이름(my-app)이 아니라 기록의 제목으로 등록
+    collect::run_claude_hook(&h.svc, &hook("SessionStart", serde_json::json!({"transcript_path": tp})))
+        .await
+        .unwrap();
+    let b = h.svc.session_brief(collect::CLAUDE, "sess-aaaa-bbbb-cccc").await.unwrap().unwrap();
+    assert_eq!(b.title, "P0b 4~6단계");
+    // 앱에서 이름을 바꾸면 다음 프롬프트 때 따라간다
+    std::fs::write(&t, "{\"type\":\"custom-title\",\"customTitle\":\"새 이름\"}\n").unwrap();
+    collect::run_claude_hook(&h.svc, &hook("UserPromptSubmit", serde_json::json!({"transcript_path": tp})))
+        .await
+        .unwrap();
+    let b = h.svc.session_brief(collect::CLAUDE, "sess-aaaa-bbbb-cccc").await.unwrap().unwrap();
+    assert_eq!(b.title, "새 이름");
+    // 제목 기록이 없으면 폴더 이름
+    assert_eq!(collect::transcript_title(&dir.path().join("없음.jsonl")), None);
+}
