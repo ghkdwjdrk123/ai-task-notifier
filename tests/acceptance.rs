@@ -144,8 +144,44 @@ async fn t05_turn_end_with_question_mark_is_not_a_decision() {
     h.send(ev(CLAUDE, "s1", EventKind::TurnEnded)).await;
     assert_eq!(h.counts().await, (0, 0));
     assert!(h.outbox_states().await.is_empty());
+    // 일하던 세션이 턴을 마치면 '지시 대기'(사용자가 이어서 지시해야 함)
     let snap = h.svc.snapshot().await.unwrap();
-    assert_eq!(snap.sessions[0].state, SessionState::Idle);
+    assert_eq!(snap.sessions[0].state, SessionState::AwaitingInput);
+    assert_eq!(snap.awaiting_input, 1);
+}
+
+#[tokio::test]
+async fn awaiting_input_follows_turns() {
+    let h = harness().await;
+    // 아직 일한 적 없는 세션의 턴 종료 신호(예: 입력 대기 알림)는 유휴 그대로
+    h.send(ev(CLAUDE, "fresh", EventKind::SessionStarted { title: "새 세션".into() }))
+        .await;
+    h.send(ev(CLAUDE, "fresh", EventKind::TurnEnded)).await;
+    let st = |snap: &ai_task_notifier::service::Snapshot, title: &str| {
+        snap.sessions.iter().find(|x| x.title == title).unwrap().state
+    };
+    let snap = h.svc.snapshot().await.unwrap();
+    assert_eq!(st(&snap, "새 세션"), SessionState::Idle);
+    assert_eq!(snap.awaiting_input, 0);
+
+    h.send(ev(CLAUDE, "w", EventKind::SessionStarted { title: "작업".into() }))
+        .await;
+    h.send(ev(CLAUDE, "w", EventKind::TurnStarted)).await;
+    h.send(ev(CLAUDE, "w", EventKind::TurnEnded)).await;
+    let snap = h.svc.snapshot().await.unwrap();
+    assert_eq!(st(&snap, "작업"), SessionState::AwaitingInput);
+    assert_eq!((snap.running, snap.awaiting_input), (0, 1));
+    // 다음 지시를 하면 진행 중으로
+    h.send(ev(CLAUDE, "w", EventKind::TurnStarted)).await;
+    let snap = h.svc.snapshot().await.unwrap();
+    assert_eq!((snap.running, snap.awaiting_input), (1, 0));
+    // 지시 대기로 하루 넘게 두면 목록에서 빠진다
+    h.send(ev(CLAUDE, "w", EventKind::TurnEnded)).await;
+    h.clock.advance(25 * 3600 * 1000);
+    h.svc.sweep_sessions().await.unwrap();
+    let snap = h.svc.snapshot().await.unwrap();
+    assert_eq!(snap.awaiting_input, 0);
+    assert!(snap.sessions.iter().all(|x| x.title != "작업"));
 }
 
 #[tokio::test]

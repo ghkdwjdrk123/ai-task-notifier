@@ -119,7 +119,16 @@ class MainActivity : Activity() {
         val col = body ?: return
         col.removeAllViews()
         val snap = st.snapshot
-        col.addView(Ui.text(this, if (snap == null) "—" else "진행 ${snap.running} · 결정 대기 ${snap.waitingDecisions}", 26f, bold = true))
+        if (snap == null) {
+            col.addView(Ui.text(this, "—", 26f, bold = true))
+        } else {
+            // 세 숫자를 칸으로: 내가 봐야 하는 칸(결정·지시 대기)이 0보다 크면 강조
+            col.addView(Ui.statRow(this,
+                Triple("진행", snap.running, false),
+                Triple("결정 대기", snap.waitingDecisions, snap.waitingDecisions > 0),
+                Triple("지시 대기", snap.awaitingInput, snap.awaitingInput > 0),
+            ))
+        }
         col.addView(Ui.status(this, linkText(st), linkColor(st)))
 
         if (st.link == Link.UNAUTHORIZED) {
@@ -142,6 +151,19 @@ class MainActivity : Activity() {
                     card.addView(Ui.text(this, "${Names.provider(d.provider)} · ${d.sessionTitle} · $due", 13f, muted = true))
                     if (d.state != "open") card.addView(Ui.text(this, if (d.state == "confirming") "반영 확인 중" else "전송 중", 13f))
                     card.setOnClickListener { openDecision(d.id) }
+                    col.addView(card)
+                }
+            }
+
+            // 지시 대기: 턴을 마치고 내 다음 지시를 기다리는 세션
+            val awaiting = snap.sessions.filter { it.state == "awaiting_input" }
+            if (awaiting.isNotEmpty()) {
+                col.addView(Ui.heading(this, "내 지시를 기다리는 세션"))
+                awaiting.sortedByDescending { it.updatedAt }.forEach { s ->
+                    val card = Ui.card(this, accent = true)
+                    card.addView(Ui.text(this, s.title, 16f, bold = true))
+                    val ended = s.updatedAt?.let { "${ago(Duration.between(it, Instant.now()))} 작업을 마침" } ?: "작업을 마침"
+                    card.addView(Ui.text(this, "${Names.provider(s.provider)} · $ended · 맥에서 이어서 지시하세요", 13f, muted = true))
                     col.addView(card)
                 }
             }
@@ -173,7 +195,7 @@ class MainActivity : Activity() {
             // 세션
             col.addView(Ui.heading(this, "활성 세션"))
             if (snap.sessions.isEmpty()) col.addView(Ui.text(this, "활성 세션 없음", muted = true))
-            snap.sessions.forEach { s ->
+            snap.sessions.sortedBy { Names.sessionOrder(it.state) }.forEach { s ->
                 col.addView(Ui.text(this, "• ${Names.provider(s.provider)} ${s.title} — ${Names.sessionState(s.state)}"))
             }
         }

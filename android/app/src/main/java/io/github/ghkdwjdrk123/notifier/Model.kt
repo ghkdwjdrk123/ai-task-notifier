@@ -10,6 +10,8 @@ data class Snapshot(
     val serverTime: Instant,
     val running: Int,
     val waitingDecisions: Int,
+    /** 턴을 마치고 내 다음 지시를 기다리는 세션 수(서버 0.2 이상). */
+    val awaitingInput: Int,
     val degraded: Boolean,
     val sessions: List<SessionItem>,
     val decisions: List<DecisionItem>,
@@ -21,6 +23,7 @@ data class Snapshot(
             serverTime = Instant.parse(j.getString("server_time")),
             running = j.getInt("running"),
             waitingDecisions = j.getInt("waiting_decisions"),
+            awaitingInput = j.optInt("awaiting_input"),
             degraded = j.optBoolean("degraded"),
             sessions = j.optJSONArray("sessions").objects().map(SessionItem::parse),
             decisions = j.optJSONArray("decisions").objects().map(DecisionItem::parse),
@@ -29,10 +32,18 @@ data class Snapshot(
     }
 }
 
-data class SessionItem(val id: String, val provider: String, val title: String, val state: String) {
+data class SessionItem(
+    val id: String,
+    val provider: String,
+    val title: String,
+    val state: String,
+    val updatedAt: Instant?,
+) {
     companion object {
-        fun parse(j: JSONObject) =
-            SessionItem(j.getString("id"), j.getString("provider"), j.getString("title"), j.getString("state"))
+        fun parse(j: JSONObject) = SessionItem(
+            j.getString("id"), j.getString("provider"), j.getString("title"), j.getString("state"),
+            j.optStringOrNull("updated_at")?.let(Instant::parse),
+        )
     }
 }
 
@@ -144,9 +155,22 @@ object Names {
         else -> w
     }
 
+    /** 맨 위 요약 한 줄. */
+    fun summary(s: Snapshot) = "진행 ${s.running} · 결정 대기 ${s.waitingDecisions} · 지시 대기 ${s.awaitingInput}"
+
+    /** 세션 목록 순서: 내가 봐야 하는 것부터. */
+    fun sessionOrder(s: String) = when (s) {
+        "waiting_decision" -> 0
+        "awaiting_input" -> 1
+        "waiting_permission" -> 2
+        "running" -> 3
+        else -> 4
+    }
+
     fun sessionState(s: String) = when (s) {
         "running" -> "진행 중"
-        "idle" -> "대기"
+        "awaiting_input" -> "지시 대기"
+        "idle" -> "유휴"
         "waiting_decision" -> "결정 대기"
         "waiting_permission" -> "입력 대기(맥에서 확인)"
         else -> s

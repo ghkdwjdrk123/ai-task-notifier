@@ -138,6 +138,26 @@ object Ui {
         }
     }
 
+    /** 숫자 칸 여러 개를 한 줄에(위: 큰 숫자, 아래: 이름). 강조 칸은 주황 테두리. */
+    fun statRow(ctx: Context, vararg cells: Triple<String, Int, Boolean>) = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(ctx, 4)
+        }
+        cells.forEachIndexed { i, (label, n, accent) ->
+            val c = card(ctx, accent).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    if (i > 0) marginStart = dp(ctx, 8)
+                    bottomMargin = dp(ctx, 6)
+                }
+                addView(text(ctx, n.toString(), 28f, bold = true).apply { gravity = Gravity.CENTER })
+                addView(text(ctx, label, 13f, muted = true).apply { gravity = Gravity.CENTER })
+            }
+            addView(c)
+        }
+    }
+
     fun bar(ctx: Context, percent: Int) = ProgressBar(ctx, null, android.R.attr.progressBarStyleHorizontal).apply {
         max = 100
         progress = percent.coerceIn(0, 100)

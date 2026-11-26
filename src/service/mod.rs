@@ -389,7 +389,7 @@ impl Service {
         .await?
         .rows_affected();
         let b = sqlx::query(
-            "UPDATE sessions SET state = 'completed', updated_at = ? WHERE state = 'idle' AND updated_at < ?",
+            "UPDATE sessions SET state = 'completed', updated_at = ? WHERE state IN ('idle','awaiting_input') AND updated_at < ?",
         )
         .bind(now)
         .bind(now - SWEEP_IDLE_AFTER_MS)

@@ -22,7 +22,8 @@ import kotlin.math.roundToInt
 
 /**
  * 상시 상태 알림. 소리·진동 없이 같은 알림 하나를 계속 고쳐 쓴다.
- * 상태바 아이콘: 결정 대기가 있으면 채운 원 안에 대기 수, 없으면 진행 수 숫자.
+ * 상태바 아이콘: 결정 대기가 있으면 채운 원 안에 결정 수, 없고 지시 대기가 있으면 채운 원 안에 지시 대기 수,
+ * 둘 다 없으면 진행 수 숫자.
  */
 object StatusNotification {
     const val CHANNEL = "status"
@@ -57,9 +58,11 @@ object StatusNotification {
     fun content(st: StatusHub.State, now: Instant = Instant.now()): Content {
         val snap = st.snapshot
         val waiting = snap?.waitingDecisions ?: 0
+        val awaiting = snap?.awaitingInput ?: 0
         val iconLabel = when {
             snap == null -> "…"
             waiting > 0 -> waiting.coerceAtMost(9).toString()
+            awaiting > 0 -> awaiting.coerceAtMost(9).toString()
             else -> snap.running.coerceAtMost(99).toString()
         }
         return when {
@@ -72,16 +75,20 @@ object StatusNotification {
                 Content(title, st.error ?: "Tailscale이 켜져 있는지 확인하세요", "", title, iconLabel, false, null)
             }
             else -> {
-                val title = "진행 ${snap.running} · 결정 대기 ${snap.waitingDecisions}" + staleSuffix(st, snap, now)
+                val title = Names.summary(snap) + staleSuffix(st, snap, now)
                 val usage = usageLine(snap, now).ifEmpty { "사용량 정보 없음" }
                 val big = StringBuilder(usage)
                 snap.decisions.take(3).forEach { big.append("\n• 결정: ").append(it.title) }
-                snap.sessions.filter { it.state != "idle" }.take(4).forEach {
+                snap.sessions.filter { it.state == "awaiting_input" }.take(3).forEach {
+                    big.append("\n• 지시 대기: ").append(Names.provider(it.provider)).append(" ").append(it.title)
+                    it.updatedAt?.let { at -> big.append(" (").append(clock.format(at)).append(" 끝남)") }
+                }
+                snap.sessions.filter { it.state !in setOf("idle", "awaiting_input", "waiting_decision") }.take(3).forEach {
                     big.append("\n• ").append(Names.provider(it.provider)).append(" ").append(it.title)
                         .append(" — ").append(Names.sessionState(it.state))
                 }
                 val single = snap.decisions.singleOrNull()?.takeIf { it.state == "open" }?.id
-                Content(title, usage, big.toString(), usage, iconLabel, waiting > 0, single)
+                Content(title, usage, big.toString(), usage, iconLabel, waiting > 0 || awaiting > 0, single)
             }
         }
     }

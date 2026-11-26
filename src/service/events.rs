@@ -326,8 +326,14 @@ impl Service {
                 }
             }
             EventKind::TurnEnded => {
-                if !state.is_terminal() && state != SessionState::Idle {
-                    set_session(&mut tx, &sid, SessionState::Idle, now).await?;
+                // 일하던 세션이 턴을 마치면 '지시 대기'. 아직 일한 적 없는 유휴 세션은 그대로 둔다.
+                if matches!(
+                    state,
+                    SessionState::Running
+                        | SessionState::WaitingDecision
+                        | SessionState::WaitingPermission
+                ) {
+                    set_session(&mut tx, &sid, SessionState::AwaitingInput, now).await?;
                     changed = true;
                 }
             }

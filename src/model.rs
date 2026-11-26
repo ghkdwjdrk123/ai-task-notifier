@@ -23,6 +23,8 @@ macro_rules! str_enum {
 str_enum!(SessionState {
     Running => "running",
     Idle => "idle",
+    // AwaitingInput: 턴을 마치고 사용자의 다음 지시를 기다린다(작업을 이어가려면 사람이 봐야 함).
+    AwaitingInput => "awaiting_input",
     WaitingDecision => "waiting_decision",
     WaitingPermission => "waiting_permission",
     Completed => "completed",

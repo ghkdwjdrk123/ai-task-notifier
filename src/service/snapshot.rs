@@ -20,6 +20,8 @@ pub struct Snapshot {
     pub running: i64,
     /// 결정 대기 수: 열림·전송 중·반영 확인 중인 결정 수.
     pub waiting_decisions: i64,
+    /// 지시 대기 수: 턴을 마치고 사용자의 다음 지시를 기다리는 세션 수.
+    pub awaiting_input: i64,
     /// 제공자 하나라도 갱신이 늦으면 true(숫자 옆에 '갱신 지연' 표시).
     pub degraded: bool,
     pub providers: Vec<ProviderHealth>,
@@ -118,6 +120,10 @@ impl Service {
             sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE state = 'running'")
                 .fetch_one(&mut *tx)
                 .await?;
+        let awaiting_input: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE state = 'awaiting_input'")
+                .fetch_one(&mut *tx)
+                .await?;
         let waiting: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM decisions WHERE state IN ('open','sending','confirming')",
         )
@@ -190,6 +196,7 @@ impl Service {
             server_time: to_datetime(now),
             running,
             waiting_decisions: waiting,
+            awaiting_input,
             degraded: providers.iter().any(|p| p.stale),
             providers,
             sessions,
