@@ -60,9 +60,8 @@ pub fn claude_hook_action(input: &Value) -> (Option<String>, HookAction) {
         "SessionEnd" => HookAction::Ingest(vec![EventKind::SessionEnded {
             outcome: SessionOutcome::Completed,
         }]),
-        "PermissionRequest" => HookAction::Ingest(vec![EventKind::PermissionRequested {
-            detail: Some("권한".into()),
-        }]),
+        // 폰 답을 기다리는 별도 경로(claude_answer::run_permission_hook)
+        "PermissionRequest" => HookAction::Ignore,
         "Notification" => match input.get("notification_type").and_then(Value::as_str) {
             Some("permission_prompt") | Some("elicitation_dialog") => {
                 HookAction::Ingest(vec![EventKind::PermissionRequested {
@@ -86,6 +85,24 @@ pub fn claude_hook_action(input: &Value) -> (Option<String>, HookAction) {
     (sid, action)
 }
 
+/// 처음 보는 세션이거나 제목이 아직 ID 조각이면 작업 폴더 이름을 제목으로 넣는 이벤트.
+fn title_event(brief: &Option<crate::service::SessionBrief>, sid: &str, cwd: &str) -> Option<EventKind> {
+    let placeholder: String = sid.chars().take(12).collect();
+    let needs_title = brief.as_ref().is_none_or(|b| b.title == placeholder);
+    (needs_title && !cwd.is_empty()).then(|| EventKind::SessionStarted {
+        title: title_from_cwd(cwd),
+    })
+}
+
+pub(crate) async fn title_event_if_needed(
+    svc: &Service,
+    sid: &str,
+    cwd: &str,
+) -> Result<Option<EventKind>> {
+    let brief = svc.session_brief(CLAUDE, sid).await?;
+    Ok(title_event(&brief, sid, cwd))
+}
+
 /// `notifier hook claude`: 표준 입력의 훅 JSON 하나를 반영한다.
 /// Claude Code를 방해하지 않도록 호출한 쪽에서 오류를 삼키고 항상 0으로 끝낸다.
 pub async fn run_claude_hook(svc: &Service, input: &str) -> Result<()> {
@@ -94,6 +111,8 @@ pub async fn run_claude_hook(svc: &Service, input: &str) -> Result<()> {
         return Ok(());
     };
     let cwd = v.get("cwd").and_then(Value::as_str).unwrap_or("");
+    // 폰 답을 기다리던 창이 맥에서 먼저 처리됐는지 먼저 정리한다
+    crate::claude_answer::close_answered_elsewhere(svc, &v).await?;
     let brief = svc.session_brief(CLAUDE, &sid).await?;
     let mut kinds = match action {
         HookAction::Ignore => return Ok(()),
@@ -109,19 +128,10 @@ pub async fn run_claude_hook(svc: &Service, input: &str) -> Result<()> {
             None => vec![EventKind::TurnStarted],
         },
     };
-    // 처음 보는 세션이거나 제목이 아직 ID 조각이면 작업 폴더 이름을 제목으로
-    let placeholder: String = sid.chars().take(12).collect();
-    let needs_title = brief.as_ref().is_none_or(|b| b.title == placeholder);
-    if needs_title
-        && !cwd.is_empty()
-        && !matches!(kinds.first(), Some(EventKind::SessionStarted { .. }))
+    if !matches!(kinds.first(), Some(EventKind::SessionStarted { .. }))
+        && let Some(t) = title_event(&brief, &sid, cwd)
     {
-        kinds.insert(
-            0,
-            EventKind::SessionStarted {
-                title: title_from_cwd(cwd),
-            },
-        );
+        kinds.insert(0, t);
     }
     for kind in kinds {
         let ev = ProviderEvent {
@@ -714,8 +724,10 @@ mod tests {
         assert!(
             matches!(claude_hook_action(&base("SessionEnd")).1, HookAction::Ingest(v) if matches!(v[0], EventKind::SessionEnded { .. }))
         );
-        assert!(
-            matches!(claude_hook_action(&base("PermissionRequest")).1, HookAction::Ingest(v) if matches!(v[0], EventKind::PermissionRequested { .. }))
+        // PermissionRequest는 폰 답을 기다리는 별도 경로(claude_answer)
+        assert_eq!(
+            claude_hook_action(&base("PermissionRequest")).1,
+            HookAction::Ignore
         );
         let mut perm = base("Notification");
         perm["notification_type"] = json!("permission_prompt");

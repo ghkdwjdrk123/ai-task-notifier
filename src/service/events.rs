@@ -340,8 +340,13 @@ impl Service {
                     .await?;
             }
             EventKind::PermissionRequested { .. } => {
-                if state != SessionState::WaitingPermission {
-                    set_session(&mut tx, &sid, SessionState::WaitingPermission, now).await?;
+                // 폰으로 답할 결정이 열려 있으면 '결정 대기'를 유지한다(같은 창의 맥 알림이 뒤따라 와도)
+                let next = match active_state(&mut tx, &sid).await? {
+                    SessionState::WaitingDecision => SessionState::WaitingDecision,
+                    _ => SessionState::WaitingPermission,
+                };
+                if state != next {
+                    set_session(&mut tx, &sid, next, now).await?;
                     changed = true;
                 }
             }

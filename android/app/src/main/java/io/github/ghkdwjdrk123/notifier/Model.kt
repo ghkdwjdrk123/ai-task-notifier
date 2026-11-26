@@ -162,7 +162,7 @@ object Names {
     }
 
     fun closedReason(r: String?) = when (r) {
-        "this_app" -> "이 앱의 답이 반영됐어요"
+        "this_app" -> "이 앱의 답을 전달했어요"
         "elsewhere" -> "다른 곳(맥)에서 먼저 답했어요"
         "withdrawn" -> "요청이 철회됐어요"
         "expired" -> "마감이 지났어요"

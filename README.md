@@ -19,8 +19,7 @@
 | 1 | 상태·API 서버(가짜 제공자로 검증) | 완료: 인수 테스트 T01~T10·T12·T13·T16~T20 자동화 |
 | 2a | 상시 알림 Android 앱, 사용량·실시간 스트림·앱 인증 | 완료(실기 설치 전) |
 | 2b | 실제 데이터 수집: Claude Code 세션(훅)·Claude 사용량(`/usage`)·Codex 세션·사용량(기록 파일) | 완료(관측만) |
-| 2c | 폰에서 보낸 답을 실제 세션에 넣기 | 예정 |
-| 2 | Claude Code 한 세션 왕복 + PWA 화면 | 예정 |
+| 2c | 폰에서 보낸 답을 실제 Claude Code 세션에 넣기(질문·실행 권한) | 완료(Codex는 관측만) |
 | 3 | Codex 연동, 동시 작업 | 예정 |
 | 4 | 외부 접속·알림 안정성 측정 | 예정 |
 
@@ -31,16 +30,25 @@
 | 대상 | 방법 | 비고 |
 |---|---|---|
 | Claude Code 세션 | Claude Code 훅 → `notifier hook claude` → DB | 세션 시작·프롬프트·멈춤·종료·권한 요청·질문(AskUserQuestion)·도구 완료. 제목은 작업 폴더 이름만, 프롬프트 내용은 저장하지 않음 |
+| Claude Code 질문·권한에 폰으로 답하기 | `PermissionRequest` 훅이 결정 요청을 만들고 폰 답을 기다림 | 맥 화면의 창도 함께 떠 있고 **먼저 온 답이 쓰임**. 폰 화면에는 질문과 선택지, 실행 권한이면 명령·파일 경로가 보임(하루 뒤 우편함 삭제) |
 | Claude 사용량 | 서버가 5분마다 `claude -p /usage` 실행 | 모델 호출 없음. `--claude-usage <CLAUDE_CONFIG_DIR>`의 로그인 사용. 출력 문구가 바뀌면 갱신이 멈출 수 있음 |
 | Codex 세션·사용량 | 서버가 5초마다 `~/.codex/sessions/**/rollout-*.jsonl`의 새 줄을 읽음 | 최근 6시간 파일만. 시작 때 가장 최근 파일의 마지막 사용량을 '○시간 전' 값으로 표시 |
 
-Claude Code 전역 설정(`~/.claude/settings.json`)에 넣는 훅(각 이벤트에 추가):
+Claude Code 전역 설정(`~/.claude/settings.json`)에 넣는 훅. 관측용(각 이벤트에 추가):
 
 ```json
 {"type": "command", "command": "/Users/<나>/.local/bin/notifier hook claude", "timeout": 5}
 ```
 
-이벤트: `SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd`, `Notification`, `PermissionRequest`(matcher `*`), `PreToolUse`(matcher `AskUserQuestion`), `PostToolUse`·`PostToolUseFailure`(matcher `*`).
+이벤트: `SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd`, `Notification`, `PreToolUse`(matcher `AskUserQuestion`), `PostToolUse`·`PostToolUseFailure`(matcher `*`).
+
+`PermissionRequest`(matcher `*`)는 폰 답을 기다리므로 **시간 제한을 길게** 따로 준다. `--wait-secs`는 `timeout`보다 30초쯤 짧게(시간 제한에 걸려 훅이 강제로 끝나면 폰 요청은 서버가 15초 안에 정리한다):
+
+```json
+{"type": "command", "command": "/Users/<나>/.local/bin/notifier hook claude --wait-secs 1170", "timeout": 1200}
+```
+
+이 훅은 맥 화면의 창을 막지 않는다(창과 동시에 돌고 먼저 온 답이 쓰임). 1200초 대기 후 답이 반영되는 것을 실측했다.
 
 서버 실행 예:
 
@@ -50,8 +58,8 @@ notifier serve --claude-usage ~/.config/<전용 폴더>/claude --claude-bin ~/.l
 
 ## 설계 요점
 
-- **폰 앱은 PWA + Web Push(VAPID)**: 네이티브 앱·Firebase 계정 없이 Chrome에서 잠금화면 알림까지 동작함을 실기로 확인했습니다.
-- **에이전트 질문 가로채기**: 공식 `claude` CLI를 헤드리스로 띄우고 `--permission-prompt-tool`로 `AskUserQuestion`을 받아 폰의 답을 `updatedInput.answers`로 돌려줍니다. 평소 대화형 세션은 `PreToolUse` 훅으로 같은 일을 할 수 있습니다.
+- **폰 앱은 Android 상시 알림**: 푸시 대신 소리 없는 상태 알림 하나가 계속 떠 있고(진행 수·결정 대기 수·사용량), 누르면 답변 화면으로 들어갑니다. Web Push 경로(0단계 검증)는 코드만 남아 있습니다.
+- **평소 세션에 답 넣기**: Claude Code의 `PermissionRequest` 훅은 맥 화면의 질문·권한 창과 **동시에** 돌고, 훅이 결정 JSON을 내면 그 답이 쓰입니다(대화형 TUI 실측). 훅 프로세스가 DB 우편함에서 폰 답을 기다렸다가 `AskUserQuestion`이면 `updatedInput.answers`, 실행 권한이면 `allow`/`deny`로 돌려줍니다. 맥에서 먼저 답하면 뒤따르는 `PostToolUse`·`Stop` 훅으로 알아채 폰 쪽 요청을 '다른 곳에서 답함'으로 닫습니다.
 - **접속**: 맥의 서비스는 `127.0.0.1`에서만 듣고, 폰은 Tailscale 같은 사설망의 HTTPS로만 들어옵니다. 푸시 페이로드와 잠금화면 문구에는 작업 내용을 넣지 않습니다.
 - **하지 않는 것**: 구독 로그인 토큰을 꺼내 API를 직접 부르기, 터미널에 문자열을 흘려 넣는 자동화.
 

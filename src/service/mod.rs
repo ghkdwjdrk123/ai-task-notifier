@@ -106,9 +106,15 @@ impl Service {
         self.clock.now_ms()
     }
 
+    /// 같은 DB를 쓰는 제공자 어댑터(우편함 등)가 쓴다.
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+
+    pub fn clock(&self) -> Arc<dyn Clock> {
+        self.clock.clone()
+    }
+
 }
 
 pub(crate) fn new_id() -> String {

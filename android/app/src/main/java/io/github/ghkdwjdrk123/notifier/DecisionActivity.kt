@@ -77,7 +77,17 @@ class DecisionActivity : Activity() {
         col.addView(Ui.text(this, d.summary.title, 20f, bold = true))
         val due = d.summary.deadlineAt?.let { "마감 ${clock.format(it)} · ${remaining(it)}" } ?: "마감 없음"
         col.addView(Ui.text(this, "${Names.provider(d.summary.provider)} · ${d.summary.sessionTitle} · $due", 13f, muted = true))
-        d.rationale?.let { col.addView(Ui.card(this).apply { addView(Ui.text(this@DecisionActivity, "추천 이유: $it", 14f)) }) }
+        d.rationale?.let { r ->
+            // 실행 권한 요청(질문 머리글 '권한')이면 무엇을 실행하는지, 아니면 Claude의 추천 이유
+            val permission = d.questions.any { it.header == "권한" }
+            col.addView(Ui.card(this).apply {
+                addView(Ui.text(this@DecisionActivity, if (permission) "실행 내용" else "추천 이유", 12f, bold = true, muted = true))
+                addView(Ui.text(this@DecisionActivity, r, 14f).apply {
+                    if (permission) typeface = android.graphics.Typeface.MONOSPACE
+                    setTextIsSelectable(true)
+                })
+            })
+        }
         message?.let { col.addView(Ui.card(this, accent = true).apply { addView(Ui.text(this@DecisionActivity, it, 15f, bold = true)) }) }
 
         if (!d.answerable) {

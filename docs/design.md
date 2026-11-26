@@ -223,8 +223,45 @@ MVP 완료 조건: T01~T32(위 변경 포함) 통과, T31 실환경 통과, 동�
 
 | 대상 | 방법 | 확인한 사실 |
 |---|---|---|
-| Claude Code 세션 | 전역 훅 → `notifier hook claude`(항상 0 종료, 표준 출력 없음, 약 15ms) | 헤드리스 시험에서 SessionStart·UserPromptSubmit·Stop·SessionEnd 순서로 실행됨. 데스크톱 앱 세션 실측은 다음 프롬프트부터 |
+| Claude Code 세션 | 전역 훅 → `notifier hook claude`(항상 0 종료, 표준 출력 없음, 약 15ms) | 헤드리스 시험에서 SessionStart·UserPromptSubmit·Stop·SessionEnd 순서로 실행됨. 데스크톱 앱 Code 탭 세션에서도 실행됨(실측) |
 | Claude 사용량 | `claude -p /usage --output-format json`(턴 0·비용 0, 모델 호출 없음)의 텍스트 `Current session: N% used · resets …`, `Current week (all models): …` 파싱 | 초기화 시각은 맥 현지 시간대로 해석. 문구가 바뀌면 파싱 실패 → 갱신 지연으로 드러남 |
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`: `session_meta`(id·cwd), `event_msg/task_started`·`task_complete`, `event_msg/token_count.rate_limits`(primary 300분·secondary 10080분, `used_percent`, `resets_at` 초) | 대화 내용 줄은 읽지 않음(type만 보고 건너뜀). 관측 시각은 줄의 `timestamp` |
 
-규칙: 질문(AskUserQuestion)·권한 요청은 지금은 '입력 대기'로만 표시한다(폰 답변 불가). 진행·대기 상태로 3시간 소식이 없으면 유휴, 유휴로 24시간이면 목록에서 뺀다. 갱신 지연 기준은 15분(사용량 수집 5분·Codex 감시 신호 1분).
+규칙: 질문(AskUserQuestion)·권한 요청은 2b에서는 '입력 대기'로만 표시했다(2c에서 폰 답변 추가). 진행·대기 상태로 3시간 소식이 없으면 유휴, 유휴로 24시간이면 목록에서 뺀다. 갱신 지연 기준은 15분(사용량 수집 5분·Codex 감시 신호 1분).
+
+### 2c단계: 실제 세션에 폰 답 넣기(2026-11-26, Claude Code 2.1.331)
+
+**실측**(가상 터미널로 대화형 TUI를 띄워 화면 출력과 훅 기록을 시각 비교, 모델 haiku, `--permission-mode default`)
+
+| 상황 | 결과 |
+|---|---|
+| `PreToolUse`(AskUserQuestion) 훅이 20초 기다린 뒤 답함 | 답은 반영되지만 **기다리는 동안 맥 화면에 질문 창이 없다**('running PreToolUse hook'만 보임) → 맥과 폰 중 먼저 답한 쪽(T15) 불가 |
+| `PermissionRequest` 훅 | 질문(AskUserQuestion)과 실행 권한(Bash 등) **모두** 이 훅을 거친다. **훅이 도는 동안 맥 화면의 창이 바로 뜬다**(0초) |
+| 폰이 먼저(훅이 8초 뒤 결정 출력) | 맥 창이 닫히고 훅 답이 쓰임(`Allowed by PermissionRequest hook`, 질문이면 `updatedInput.answers`의 답) |
+| 맥이 먼저(훅은 40초 기다림) | 맥 답이 쓰이고 세션은 바로 이어진다. **훅 프로세스는 끝나지 않고 계속 돌며**(신호 없음) 나중 출력은 버려진다 |
+| 창이 뜨고 약 6초 뒤 | `Notification(permission_prompt)`가 온다(훅이 도는 중에도) |
+| 훅 입력 | `session_id`·`tool_name`·`tool_input`·`permission_suggestions`·`permission_mode`, **`tool_use_id`는 없음** |
+
+| 훅 `timeout` 1200초, 700초 기다린 뒤 답 | 반영됨(기본 600초보다 길게 줄 수 있음) |
+| 맥이 먼저 답한 뒤 훅의 표준 입출력 | 닫히지 않는다(출력 쓰기 성공). 훅이 맥 답을 직접 알 방법 없음 |
+
+공식 문서 확인: 훅 `timeout` 기본 600초(command), 문서상 최대값 없음. 결정 형식은 `hookSpecificOutput.decision.behavior`(`allow`+`updatedInput`/`updatedPermissions`, `deny`+`message`/`interrupt`). 공식 원격 승인 경로로 Channels의 권한 릴레이(`claude/channel/permission`, 먼저 온 답 적용)가 있으나 도구 승인만 다루고(질문 아님) 세션마다 `--channels`로 켜야 해서 쓰지 않는다.
+
+**구현**
+
+| 부분 | 내용 |
+|---|---|
+| 훅(`notifier hook claude`, PermissionRequest) | 결정 요청(`perm:<uuid>`)과 우편함 행(`hook_waits`)을 만들고 0.3초마다 읽기로 살핀다(답이 있을 때만 쓰기). 폰 답이 들어오면 가져가(`taken_at`) 결정 JSON을 표준 출력에 쓴다. 결정이 다른 경로로 닫히면 출력 없이 끝낸다. 5초마다 살아 있다는 표시(`last_polled_at`). 일시 DB 오류는 다시 시도하고 20번 연속이면 포기. `--wait-secs`(기본 570초, 실제 설정 1170초·timeout 1200초)가 지나면 우편함을 닫고 결정을 철회, 세션은 '입력 대기(맥에서 확인)' |
+| 폰에 보이는 것 | 질문이면 질문·선택지·직접 입력. 실행 권한이면 '○○ 실행을 허용할까요?'(허용/거부)와 실행 내용(Bash는 설명+명령, 파일 도구는 경로, 그 밖은 입력 JSON, 3000자까지) |
+| 서버 어댑터(`ClaudeHookProvider`) | 우편함에 답을 쓰고 훅이 10초 안에 가져가면 수락, 훅이 가져가지 않고 닫혔거나 살아 있다는 표시가 15초 넘게 없으면(그때 우편함을 닫음) 확실한 미반영, 그 밖은 '알 수 없음'(반영 확인 중) |
+| 맥에서 먼저 답함 | 같은 세션·같은 에이전트(`agent_id`)의 `PostToolUse`·`PostToolUseFailure`가 같은 도구·같은 입력(`answers`를 뺀 입력 JSON의 sha256)이거나, 창이 생기고 3초 넘게 지난 뒤 끝난 다른 도구(맥에서 거부하고 넘어간 경우)면 닫는다. `Stop`·`StopFailure`·`UserPromptSubmit`·`SessionEnd`는 그 세션 전부. 우편함을 닫는 쪽과 가져가는 쪽은 같은 행의 조건부 UPDATE라 하나만 이긴다. `idle_prompt`는 창이 떠 있는 동안 올 수 있어 쓰지 않는다 |
+| 상태 | 결정이 열려 있으면 뒤따르는 `permission_prompt` 알림이 와도 '결정 대기' 유지 |
+| 정리(1분마다) | 살아 있다는 표시가 15초 넘게 없는 기다림은 닫고 결정 철회. 우편함은 닫혔는데 결정이 열린 채인 것(닫는 도중 끊김)은 1분 뒤 철회. 끝난 우편함(답 내용 포함)은 하루 뒤 삭제 |
+
+**남은 한계**
+
+- 폰 쪽 '반영 완료'는 '훅이 답을 가져가 Claude Code에 냈다'는 뜻이다. 맥에서 먼저 답했는데 아직 닫는 신호가 오지 않은 사이(예: 맥에서 허용한 명령이 오래 도는 동안, 거부 직후 3초 안) 폰에서도 답하면 실제로는 맥 답이 쓰였어도 폰은 '반영 완료'로 보인다. 앱 문구는 '이 앱의 답을 전달했어요'로 둔다.
+- 같은 에이전트가 병렬로 부른 도구가 창이 생기고 3초 넘게 지나 끝나면 아직 떠 있는 창도 닫힌 것으로 본다(폰으로 못 답할 뿐 맥 창은 그대로).
+- Esc로 턴을 멈춰 창이 사라지면 Stop 훅이 없어, 다음 프롬프트·`idle_prompt`·기다림 끝까지 폰에 요청이 남는다.
+- 데스크톱 앱(Agent SDK 호스트) 세션에서 `PermissionRequest` 훅이 같은 방식으로 경합하는지는 문서상 '호스트와 훅 중 먼저 결정한 쪽'이며 실기 확인은 이 단계 배포 후 진행.
+- Codex는 관측만(기록 파일 읽기). 승인·질문에 답하는 공식 외부 경로를 찾지 못했다.

@@ -1,6 +1,7 @@
 //! notifier 명령: 서비스 실행, 기기 등록 코드 발급, 기기 목록·해제, 이벤트 넣기.
 
 use ai_task_notifier::api::{self, ApiConfig, AppState};
+use ai_task_notifier::claude_answer;
 use ai_task_notifier::clock::SystemClock;
 use ai_task_notifier::collect;
 use ai_task_notifier::db;
@@ -51,7 +52,7 @@ enum Cmd {
         #[arg(long, value_name = "CODEX_HOME")]
         codex: Option<PathBuf>,
     },
-    /// Claude Code 훅에서 부른다: 표준 입력의 훅 JSON을 반영한다. 항상 0으로 끝나고 표준 출력에 아무것도 쓰지 않는다.
+    /// Claude Code 훅에서 부른다: 표준 입력의 훅 JSON을 반영한다. 항상 0으로 끝난다. 표준 출력에는 PermissionRequest에 폰 답이 왔을 때의 결정 JSON만 쓴다(`--wait-secs`초까지 기다림).
     Hook {
         /// 지금은 "claude"만.
         provider: String,
@@ -82,15 +83,44 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("hook") {
         let provider = args.get(2).cloned().unwrap_or_default();
+        // PermissionRequest 훅이 폰 답을 기다리는 최대 초(설정의 훅 timeout보다 짧게)
+        let wait_secs = args
+            .iter()
+            .position(|a| a == "--wait-secs")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(claude_answer::DEFAULT_WAIT_SECS);
         let db = std::env::var_os("NOTIFIER_DB")
             .map(PathBuf::from)
             .or_else(|| default_db().ok());
-        if let Some(db) = db {
-            match tokio::time::timeout(Duration::from_secs(4), run_hook(&db, &provider)).await {
-                Ok(Err(e)) => eprintln!("notifier hook: {e:#}"),
-                Err(_) => eprintln!("notifier hook: 시간 초과(4초)"),
-                Ok(Ok(())) => {}
+        let mut input = String::new();
+        if std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut input).is_err() {
+            return Ok(());
+        }
+        let Some(db) = db else { return Ok(()) };
+        if provider != "claude" {
+            eprintln!("notifier hook: 지원하지 않는 훅 제공자: {provider}");
+            return Ok(());
+        }
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
+        if v.get("hook_event_name").and_then(|e| e.as_str()) == Some("PermissionRequest") {
+            // 폰 답을 기다린다. 표준 출력에는 훅 결정 JSON 하나만 쓴다(없으면 맥 화면의 답을 따름).
+            match run_permission_hook(&db, &v, Duration::from_secs(wait_secs)).await {
+                Ok(Some(out)) => {
+                    // 표준 출력이 닫혀 있어도 패닉하지 않는다(종료 코드는 항상 0)
+                    use std::io::Write;
+                    let mut so = std::io::stdout().lock();
+                    let _ = writeln!(so, "{out}").and_then(|_| so.flush());
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("notifier hook: {e:#}"),
             }
+            return Ok(());
+        }
+        match tokio::time::timeout(Duration::from_secs(4), run_hook(&db, &input)).await {
+            Ok(Err(e)) => eprintln!("notifier hook: {e:#}"),
+            Err(_) => eprintln!("notifier hook: 시간 초과(4초)"),
+            Ok(Ok(())) => {}
         }
         return Ok(());
     }
@@ -108,7 +138,12 @@ async fn main() -> Result<()> {
     };
 
     let pool = db::open(&db_path).await?;
-    let mut base = Service::new(pool.clone(), Arc::new(SystemClock));
+    let clock = Arc::new(SystemClock);
+    // Claude Code 답 전달: PermissionRequest 훅이 기다리는 우편함에 넣는다
+    let mut base = Service::new(pool.clone(), clock.clone()).with_provider(
+        collect::CLAUDE,
+        Arc::new(claude_answer::ClaudeHookProvider::new(pool.clone(), clock)),
+    );
     if let Cmd::Serve {
         demo_provider: Some(name),
         ..
@@ -246,17 +281,26 @@ struct Collectors {
     codex_home: Option<PathBuf>,
 }
 
-async fn run_hook(db_path: &std::path::Path, provider: &str) -> Result<()> {
-    if provider != "claude" {
-        bail!("지원하지 않는 훅 제공자: {provider}");
-    }
-    let mut input = String::new();
-    std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut input)?;
+async fn run_hook(db_path: &std::path::Path, input: &str) -> Result<()> {
     let Some(pool) = db::open_for_hook(db_path).await? else {
         return Ok(()); // DB가 아직 없음(서버를 한 번도 안 띄움): 아무것도 하지 않는다
     };
     let svc = Service::new(pool.clone(), Arc::new(SystemClock));
-    let r = collect::run_claude_hook(&svc, &input).await;
+    let r = collect::run_claude_hook(&svc, input).await;
+    pool.close().await;
+    r
+}
+
+async fn run_permission_hook(
+    db_path: &std::path::Path,
+    input: &serde_json::Value,
+    wait: Duration,
+) -> Result<Option<serde_json::Value>> {
+    let Some(pool) = db::open_for_hook(db_path).await? else {
+        return Ok(None);
+    };
+    let svc = Service::new(pool.clone(), Arc::new(SystemClock));
+    let r = claude_answer::run_permission_hook(&svc, input, wait).await;
     pool.close().await;
     r
 }
@@ -284,8 +328,7 @@ async fn serve(
         tracing::info!("Codex 기록 감시: {}", home.join("sessions").display());
         tasks.push(tokio::spawn(run_codex_watch(svc.clone(), home)));
     }
-    // 답을 원래 세션에 넣는 어댑터는 아직 없다(관측만). --demo-provider로 붙인 시험용 제공자만 답을 받는다.
-    tracing::info!("답 전달 어댑터 미연결: 폰에서 보낸 답은 --demo-provider 제공자에만 전달됩니다");
+    tracing::info!("Claude Code 답 전달: PermissionRequest 훅 우편함(Codex는 관측만)");
 
     let app = api::router(AppState {
         svc,
@@ -371,6 +414,10 @@ async fn run_worker(svc: Arc<Service>, wake: Arc<Notify>) {
             last_sweep = tokio::time::Instant::now();
             if let Err(e) = svc.sweep_sessions().await {
                 tracing::error!("세션 정리 실패: {e:#}");
+            }
+            // 사라진 훅이 남긴 기다림·닫다 끊긴 결정 정리
+            if let Err(e) = claude_answer::sweep_stale_waits(&svc).await {
+                tracing::error!("훅 기다림 정리 실패: {e:#}");
             }
         }
         if last_reconcile.elapsed() >= Duration::from_secs(10) {

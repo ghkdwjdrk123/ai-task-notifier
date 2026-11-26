@@ -9,6 +9,7 @@
 //! 설계는 `docs/design.md`를 따른다.
 
 pub mod api;
+pub mod claude_answer;
 pub mod clock;
 pub mod collect;
 pub mod db;

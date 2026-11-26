@@ -14,7 +14,8 @@ use std::time::Duration;
 
 const V1_INIT: &str = include_str!("../migrations/0001_init.sql");
 const V2_USAGE: &str = include_str!("../migrations/0002_usage.sql");
-pub const SCHEMA_VERSION: i64 = 2;
+const V3_HOOK_WAITS: &str = include_str!("../migrations/0003_hook_waits.sql");
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub type Tx = Transaction<'static, Sqlite>;
 
@@ -98,6 +99,15 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             .await
             .context("스키마 v2 적용 실패")?;
         sqlx::query("PRAGMA user_version = 2")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 3 {
+        sqlx::raw_sql(V3_HOOK_WAITS)
+            .execute(&mut *tx)
+            .await
+            .context("스키마 v3 적용 실패")?;
+        sqlx::query("PRAGMA user_version = 3")
             .execute(&mut *tx)
             .await?;
     }
