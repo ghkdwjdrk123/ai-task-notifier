@@ -45,6 +45,9 @@ enum Cmd {
         /// Claude 사용량을 `claude -p /usage`로 5분마다 읽는다(모델 호출 없음). 이 설정 폴더의 로그인을 쓴다.
         #[arg(long, value_name = "CLAUDE_CONFIG_DIR")]
         claude_usage: Option<PathBuf>,
+        /// 받아 줄 Host 이름(포트 제외). 루프백과 *.ts.net은 항상 받는다. 여러 번 줄 수 있다.
+        #[arg(long = "allowed-host")]
+        allowed_hosts: Vec<String>,
         /// 폰 앱 업데이트 폴더(`latest.apk`·`latest.json`, `android/publish.sh`가 만든다).
         /// 기본: DB 옆 `app` 폴더.
         #[arg(long)]
@@ -233,6 +236,7 @@ async fn main() -> Result<()> {
             claude_usage,
             claude_bin,
             app_dir,
+            allowed_hosts,
             codex,
         } => {
             if !listen.ip().is_loopback() {
@@ -257,6 +261,7 @@ async fn main() -> Result<()> {
                     allowed_origins,
                     secure_cookie: !insecure_cookie,
                     app_dir: Some(app_dir.unwrap_or_else(|| db_path.with_file_name("app"))),
+                    allowed_hosts,
                 },
                 Collectors {
                     claude_usage: claude_usage.map(|dir| ClaudeUsage {
@@ -339,6 +344,7 @@ async fn serve(
         svc,
         cfg: Arc::new(cfg),
         wake,
+        streams: Default::default(),
     });
     let listener = tokio::net::TcpListener::bind(listen)
         .await

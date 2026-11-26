@@ -22,8 +22,10 @@ fn app(h: &H) -> Router {
             allowed_origins: vec![ORIGIN.into()],
             secure_cookie: true,
             app_dir: None,
+            allowed_hosts: vec![],
         }),
         wake: Arc::new(Notify::new()),
+        streams: Default::default(),
     })
 }
 
@@ -608,8 +610,10 @@ async fn app_update_is_served_to_paired_devices_only() {
                 allowed_origins: vec![ORIGIN.into()],
                 secure_cookie: true,
                 app_dir: d,
+                allowed_hosts: vec![],
             }),
             wake: Arc::new(Notify::new()),
+            streams: Default::default(),
         })
     };
     let app = with_dir(Some(dir.path().to_path_buf()));
@@ -663,4 +667,36 @@ async fn app_update_is_served_to_paired_devices_only() {
     assert_eq!(res.headers()[header::CACHE_CONTROL], "no-store");
     let body = res.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body.as_ref(), apk.as_slice());
+}
+
+#[tokio::test]
+async fn foreign_host_is_rejected_and_streams_are_capped() {
+    let h = harness().await;
+    let app = app(&h);
+    let c = paired(&h, &app).await;
+    let get = |host: &str, path: &str| {
+        Request::builder()
+            .uri(path)
+            .header(header::HOST, host)
+            .header(header::COOKIE, format!("{COOKIE}={c}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    // DNS 리바인딩: 남의 도메인 이름으로 온 요청은 인증 전에 거절
+    let res = app.clone().oneshot(get("evil.example:8770", "/v1/snapshot")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::MISDIRECTED_REQUEST);
+    let res = app.clone().oneshot(get("mac.example.ts.net:8443", "/v1/snapshot")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    // 기기당 스트림은 4개까지. 하나를 닫으면 다시 열 수 있다
+    let mut open = Vec::new();
+    for _ in 0..4 {
+        let res = app.clone().oneshot(get("127.0.0.1:8770", "/v1/stream")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        open.push(res);
+    }
+    let res = app.clone().oneshot(get("127.0.0.1:8770", "/v1/stream")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    drop(open.pop());
+    let res = app.clone().oneshot(get("127.0.0.1:8770", "/v1/stream")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
 }

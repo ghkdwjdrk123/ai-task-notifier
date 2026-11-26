@@ -36,6 +36,64 @@ pub struct ApiConfig {
     pub secure_cookie: bool,
     /// 앱 업데이트 폴더(`latest.apk`·`latest.json`). 등록된 기기에만 내려준다.
     pub app_dir: Option<std::path::PathBuf>,
+    /// 받아 줄 Host 이름(포트 제외). 루프백과 `*.ts.net`은 항상 받는다(DNS 리바인딩 방어).
+    pub allowed_hosts: Vec<String>,
+}
+
+/// 기기 하나가 동시에 열 수 있는 실시간 스트림 수(재연결이 겹치는 정도만 허용).
+const MAX_STREAMS_PER_DEVICE: usize = 4;
+
+/// 기기별 열린 스트림 수.
+pub type StreamCounts = Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>;
+
+/// 스트림 자리 하나. 스트림이 끝나면(연결 끊김 포함) 돌려준다.
+struct StreamSlot {
+    counts: StreamCounts,
+    device: String,
+}
+
+impl StreamSlot {
+    fn take(counts: &StreamCounts, device: &str) -> Option<Self> {
+        let mut m = counts.lock().unwrap();
+        let n = m.entry(device.to_string()).or_insert(0);
+        if *n >= MAX_STREAMS_PER_DEVICE {
+            return None;
+        }
+        *n += 1;
+        Some(Self {
+            counts: counts.clone(),
+            device: device.to_string(),
+        })
+    }
+}
+
+impl Drop for StreamSlot {
+    fn drop(&mut self) {
+        let mut m = self.counts.lock().unwrap();
+        if let Some(n) = m.get_mut(&self.device) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                m.remove(&self.device);
+            }
+        }
+    }
+}
+
+/// Host 헤더 검사: 포트를 떼고 루프백·`*.ts.net`·허용 목록만. Host가 없으면(브라우저 아님) 통과.
+fn host_allowed(host: Option<&str>, extra: &[String]) -> bool {
+    let Some(h) = host else { return true };
+    let h = h.trim().to_ascii_lowercase();
+    let name = if let Some(rest) = h.strip_prefix('[') {
+        // [::1]:8770
+        rest.split(']').next().unwrap_or("")
+    } else {
+        h.rsplit_once(':').map_or(h.as_str(), |(n, port)| {
+            if port.chars().all(|c| c.is_ascii_digit()) { n } else { h.as_str() }
+        })
+    };
+    matches!(name, "127.0.0.1" | "localhost" | "::1")
+        || (name.ends_with(".ts.net") && name.len() > ".ts.net".len())
+        || extra.iter().any(|e| e.eq_ignore_ascii_case(name))
 }
 
 #[derive(Clone)]
@@ -44,6 +102,8 @@ pub struct AppState {
     pub cfg: Arc<ApiConfig>,
     /// 답이 접수되면 전달 작업자를 깨운다.
     pub wake: Arc<Notify>,
+    /// 기기별 열린 실시간 스트림 수.
+    pub streams: StreamCounts,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -143,6 +203,20 @@ impl From<anyhow::Error> for ApiError {
 // ---------- 공통 검사 ----------
 
 async fn guard(State(st): State<AppState>, req: Request, next: Next) -> Response {
+    // DNS 리바인딩: 남의 도메인 이름으로 들어온 요청은 처음부터 받지 않는다
+    let host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok());
+    if !host_allowed(host, &st.cfg.allowed_hosts) {
+        tracing::warn!("허용되지 않은 Host로 온 요청 거절: {:?}", host);
+        let mut res = ApiError::new(
+            StatusCode::MISDIRECTED_REQUEST,
+            "bad_host",
+            "허용되지 않은 주소로 온 요청입니다",
+        )
+        .into_response();
+        res.headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        return res;
+    }
     let write = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
     if write {
         let origin = req
@@ -273,13 +347,20 @@ async fn snapshot(State(st): State<AppState>, _d: AuthDevice) -> Result<Response
 async fn stream(
     State(st): State<AppState>,
     headers: HeaderMap,
-    _d: AuthDevice,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    AuthDevice(dev): AuthDevice,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let Some(slot) = StreamSlot::take(&st.streams, &dev.id) else {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_streams",
+            "이 기기의 실시간 연결이 너무 많습니다. 잠시 뒤 다시 연결하세요",
+        ));
+    };
     let token = device_token(&headers).unwrap_or_default().to_string();
     let svc = st.svc.clone();
     let events = futures_util::stream::unfold(
-        (svc, token, None::<i64>, Instant::now()),
-        |(svc, token, last, mut sent_at)| async move {
+        (svc, token, None::<i64>, Instant::now(), slot),
+        |(svc, token, last, mut sent_at, slot)| async move {
             if last.is_some() {
                 // 다음 보낼 때까지 1초 간격으로 버전 확인
                 loop {
@@ -312,10 +393,10 @@ async fn stream(
                 }
             };
             sent_at = Instant::now();
-            Some((Ok(event), (svc, token, version.or(Some(-1)), sent_at)))
+            Some((Ok(event), (svc, token, version.or(Some(-1)), sent_at, slot)))
         },
     );
-    Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+    Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
 async fn decision_detail(
@@ -444,4 +525,35 @@ async fn app_apk(State(st): State<AppState>, _d: AuthDevice) -> Result<Response,
         h.insert("x-apk-sha256", v);
     }
     Ok(res)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_allowed;
+
+    #[test]
+    fn host_allowlist() {
+        let extra = vec!["mac.lan".to_string()];
+        for ok in [
+            None,
+            Some("127.0.0.1:8770"),
+            Some("localhost:8770"),
+            Some("[::1]:8770"),
+            Some("mac-mini.example.ts.net:8443"),
+            Some("Mac-Mini.Example.TS.NET"),
+            Some("mac.lan:8770"),
+        ] {
+            assert!(host_allowed(ok, &extra), "{ok:?}");
+        }
+        for bad in [
+            Some("evil.example:8770"),
+            Some("127.0.0.1.evil.example"),
+            Some("ts.net"),
+            Some(".ts.net"),
+            Some("evilts.net"),
+            Some("192.168.0.10:8770"),
+        ] {
+            assert!(!host_allowed(bad, &extra), "{bad:?}");
+        }
+    }
 }
