@@ -46,10 +46,10 @@ Claude Code 전역 설정(`~/.claude/settings.json`)에 넣는 훅. 관측용(�
 `PermissionRequest`(matcher `*`)는 폰 답을 기다리므로 **시간 제한을 길게** 따로 준다. `--wait-secs`는 `timeout`보다 30초쯤 짧게(시간 제한에 걸려 훅이 강제로 끝나면 폰 요청은 서버가 15초 안에 정리한다):
 
 ```json
-{"type": "command", "command": "/Users/<나>/.local/bin/notifier hook claude --wait-secs 1170", "timeout": 1200}
+{"type": "command", "command": "/Users/<나>/.local/bin/notifier hook claude --wait-secs 86340", "timeout": 86400}
 ```
 
-이 훅은 맥 화면의 창을 막지 않는다(창과 동시에 돌고 먼저 온 답이 쓰임). 1200초 대기 후 답이 반영되는 것을 실측했다.
+이 훅은 맥 화면의 창을 막지 않는다(창과 동시에 돌고 먼저 온 답이 쓰임). 그래서 요청을 하루까지 쌓아 두고 늦게라도 폰에서 답할 수 있게 길게 준다. timeout 3600초에서 22분 뒤 답이 반영되는 것을 실측했다(그보다 긴 상한이 있으면 훅이 끝나는 대로 서버가 15~60초 안에 폰 요청을 '입력 대기(맥에서 확인)'로 돌린다).
 
 서버 실행 예:
 
