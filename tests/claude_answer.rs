@@ -96,7 +96,10 @@ async fn phone_answer_reaches_waiting_hook() {
     let h = h().await;
     let (task, d) = start_hook(&h, bash(), Duration::from_secs(10)).await;
     assert_eq!(state(&h).await, SessionState::WaitingDecision);
-    assert_eq!(d.rationale.as_deref(), Some("배포\n\n$ cargo publish"));
+    assert_eq!(
+        d.rationale.as_deref(),
+        Some("$ cargo publish\n\nClaude 설명(확인 안 됨): 배포")
+    );
     assert_eq!(d.summary.title, "my-app");
     // 같은 창의 맥 알림(약 6초 뒤)이 와도 '결정 대기'를 유지한다
     hook(&h, "Notification", json!({"notification_type": "permission_prompt"})).await;

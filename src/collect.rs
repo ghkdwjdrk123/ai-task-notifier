@@ -40,6 +40,23 @@ pub enum HookAction {
     Ignore,
 }
 
+/// Stop 훅의 `background_tasks`에 아직 도는 백그라운드 에이전트가 있는지.
+/// 셸 작업은 세지 않는다: 개발 서버·감시처럼 끝나지 않는 것이 많아, 세면 계속 '진행 중'으로 남는다.
+fn has_background_agent(input: &Value) -> bool {
+    input
+        .get("background_tasks")
+        .and_then(Value::as_array)
+        .is_some_and(|tasks| {
+            tasks.iter().any(|t| {
+                let ty = t.get("type").and_then(Value::as_str).unwrap_or("");
+                t.get("status").and_then(Value::as_str) == Some("running")
+                    && !ty.is_empty()
+                    && !ty.contains("shell")
+                    && !ty.contains("bash")
+            })
+        })
+}
+
 /// Claude Code 훅 입력 → 할 일. `session_id`가 없으면 무시.
 pub fn claude_hook_action(input: &Value) -> (Option<String>, HookAction) {
     let sid = input
@@ -56,6 +73,8 @@ pub fn claude_hook_action(input: &Value) -> (Option<String>, HookAction) {
             title: title_from_cwd(cwd),
         }]),
         "UserPromptSubmit" => HookAction::Ingest(vec![EventKind::TurnStarted]),
+        // 턴은 끝났어도 백그라운드 에이전트가 돌고 있으면 그 결과로 곧 다시 이어지므로 '진행 중'
+        "Stop" if has_background_agent(input) => HookAction::Ingest(vec![EventKind::TurnStarted]),
         "Stop" | "StopFailure" => HookAction::Ingest(vec![EventKind::TurnEnded]),
         "SessionEnd" => HookAction::Ingest(vec![EventKind::SessionEnded {
             outcome: SessionOutcome::Completed,
@@ -493,11 +512,21 @@ impl CodexWatcher {
         let Some(path) = self.newest_file() else {
             return Ok(());
         };
-        let f = std::io::BufReader::new(std::fs::File::open(&path)?);
+        let mut f = std::io::BufReader::new(std::fs::File::open(&path)?);
         let mut last: Option<(usize, Vec<UsageWindow>)> = None;
         let mut scratch = CodexFile::default();
-        for (i, line) in f.lines().enumerate() {
-            let Ok(line) = line else { break };
+        let mut buf = Vec::new();
+        let mut i = 0;
+        loop {
+            let l = read_line_bounded(&mut f, &mut buf, MAX_LINE_BYTES)?;
+            if l.consumed == 0 {
+                break;
+            }
+            i += 1;
+            if l.too_long {
+                continue;
+            }
+            let line = String::from_utf8_lossy(&buf);
             if !line.contains("\"rate_limits\"") {
                 continue;
             }
@@ -506,7 +535,7 @@ impl CodexWatcher {
             };
             for k in codex_line_events(&v, &mut scratch) {
                 if let EventKind::UsageReported { windows } = k {
-                    last = Some((i + 1, windows));
+                    last = Some((i, windows));
                 }
             }
         }
@@ -631,17 +660,20 @@ fn read_new_lines(path: &Path, st: &mut CodexFile) -> Result<Vec<(u64, String)>>
     f.seek(SeekFrom::Start(st.offset))?;
     let mut r = std::io::BufReader::new(f);
     let mut out = vec![];
+    let mut kept = 0usize;
     let mut buf = Vec::new();
-    loop {
-        buf.clear();
-        let read = r.read_until(b'\n', &mut buf)?;
-        if read == 0 || buf.last() != Some(&b'\n') {
+    // 한 번에 모으는 양을 제한한다(서버를 막 켰을 때 큰 기록 파일을 통째로 메모리에 올리지 않게).
+    // 남은 줄은 다음 확인(5초 뒤)에 이어서 읽는다.
+    while kept < MAX_BATCH_BYTES {
+        let line = read_line_bounded(&mut r, &mut buf, MAX_LINE_BYTES)?;
+        if !line.complete {
             break; // 아직 쓰는 중인 마지막 줄은 다음에
         }
-        st.offset += read as u64;
+        st.offset += line.consumed as u64;
         st.line_no += 1;
         // 아주 긴 줄(이미지 등)은 건너뛴다. 깨진 글자는 대체 문자로(오류로 멈추지 않게)
-        if buf.len() <= MAX_LINE_BYTES {
+        if !line.too_long {
+            kept += buf.len();
             out.push((
                 st.line_no,
                 String::from_utf8_lossy(&buf).trim_end().to_string(),
@@ -653,6 +685,48 @@ fn read_new_lines(path: &Path, st: &mut CodexFile) -> Result<Vec<(u64, String)>>
 
 /// 이보다 긴 기록 줄은 읽지 않는다(사용량·상태 줄은 몇 KB 이하).
 const MAX_LINE_BYTES: usize = 1 << 20;
+/// 한 번에 모으는 줄의 총량.
+const MAX_BATCH_BYTES: usize = 16 << 20;
+
+struct BoundedLine {
+    /// 파일에서 소비한 바이트(줄바꿈 포함).
+    consumed: usize,
+    /// 줄바꿈으로 끝났는지(아니면 파일 끝에서 아직 쓰는 중).
+    complete: bool,
+    /// 한도를 넘어 buf에 일부만 담았는지.
+    too_long: bool,
+}
+
+/// 한 줄을 읽되 `max` 바이트까지만 buf에 담는다(긴 줄도 메모리를 한도 이상 쓰지 않고 건너뜀).
+fn read_line_bounded(
+    r: &mut impl BufRead,
+    buf: &mut Vec<u8>,
+    max: usize,
+) -> std::io::Result<BoundedLine> {
+    buf.clear();
+    let mut consumed = 0;
+    let mut too_long = false;
+    loop {
+        let chunk = r.fill_buf()?;
+        if chunk.is_empty() {
+            return Ok(BoundedLine { consumed, complete: false, too_long });
+        }
+        let (take, done) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        let room = max.saturating_sub(buf.len());
+        if take > room {
+            too_long = true;
+        }
+        buf.extend_from_slice(&chunk[..take.min(room)]);
+        r.consume(take);
+        consumed += take;
+        if done {
+            return Ok(BoundedLine { consumed, complete: true, too_long });
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -713,6 +787,42 @@ mod tests {
         );
         assert_eq!(w.len(), 1);
         assert_eq!((w[0].name.as_str(), w[0].used_percent), ("five_hour", 0.0));
+    }
+
+    #[test]
+    fn long_lines_are_skipped_without_buffering_them() {
+        let data = format!("short\n{}\nnext\npartial", "x".repeat(100));
+        let mut r = std::io::BufReader::with_capacity(8, data.as_bytes());
+        let mut buf = Vec::new();
+        let a = read_line_bounded(&mut r, &mut buf, 10).unwrap();
+        assert!(a.complete && !a.too_long && buf == b"short\n");
+        let b = read_line_bounded(&mut r, &mut buf, 10).unwrap();
+        assert!(b.complete && b.too_long && b.consumed == 101 && buf.len() == 10);
+        let c = read_line_bounded(&mut r, &mut buf, 10).unwrap();
+        assert!(c.complete && buf == b"next\n");
+        let d = read_line_bounded(&mut r, &mut buf, 10).unwrap();
+        assert!(!d.complete && d.consumed == 7);
+    }
+
+    #[test]
+    fn stop_with_background_agent_stays_running() {
+        let stop = |bg: Value| {
+            claude_hook_action(&json!({"session_id": "s", "hook_event_name": "Stop", "background_tasks": bg})).1
+        };
+        assert_eq!(stop(json!([])), HookAction::Ingest(vec![EventKind::TurnEnded]));
+        // 끝나지 않는 셸(서버 등)은 세지 않는다
+        assert_eq!(
+            stop(json!([{"id": "b1", "type": "shell", "status": "running", "command": "npm run dev"}])),
+            HookAction::Ingest(vec![EventKind::TurnEnded])
+        );
+        assert_eq!(
+            stop(json!([{"id": "a1", "type": "subagent", "status": "running", "agent_type": "general-purpose"}])),
+            HookAction::Ingest(vec![EventKind::TurnStarted])
+        );
+        assert_eq!(
+            stop(json!([{"id": "a1", "type": "subagent", "status": "completed"}])),
+            HookAction::Ingest(vec![EventKind::TurnEnded])
+        );
     }
 
     #[test]

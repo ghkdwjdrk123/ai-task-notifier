@@ -1,6 +1,9 @@
 package io.github.ghkdwjdrk123.notifier
 
 import android.app.Activity
+import android.hardware.biometrics.BiometricManager
+import android.hardware.biometrics.BiometricPrompt
+import android.os.CancellationSignal
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -153,11 +156,46 @@ class DecisionActivity : Activity() {
                 answers.put(key, value)
             }
             send.isEnabled = false
-            status.text = "전송 중…"
-            submit(d, answers, status) { send.isEnabled = true }
+            // 실행 권한 '허용'은 폰을 잠깐 손에 넣은 사람이 보내지 못하게 지문·화면 잠금으로 한 번 더 확인
+            val allowsExecution = d.questions.any { q -> q.header == "권한" && answers.optString(q.text) == "허용" }
+            if (allowsExecution) {
+                confirmOwner(status, onOk = {
+                    status.text = "전송 중…"
+                    submit(d, answers, status) { send.isEnabled = true }
+                }, onFail = { send.isEnabled = true })
+            } else {
+                status.text = "전송 중…"
+                submit(d, answers, status) { send.isEnabled = true }
+            }
         }
         col.addView(send)
         Ui.screen(this, "결정", ::finish, col)
+    }
+
+    /** 지문·얼굴 또는 화면 잠금(PIN·패턴)으로 본인 확인. 화면 잠금이 없으면 허용을 보낼 수 없다. */
+    private fun confirmOwner(status: android.widget.TextView, onOk: () -> Unit, onFail: () -> Unit) {
+        val auth = BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        if (getSystemService(BiometricManager::class.java).canAuthenticate(auth) != BiometricManager.BIOMETRIC_SUCCESS) {
+            status.text = "폰에 화면 잠금(지문·PIN 등)이 있어야 실행을 허용할 수 있어요. 맥에서 허용하거나 잠금을 설정하세요"
+            onFail()
+            return
+        }
+        val prompt = BiometricPrompt.Builder(this)
+            .setTitle("실행 허용 확인")
+            .setSubtitle("맥에서 명령을 실행하도록 허용합니다")
+            .setAllowedAuthenticators(auth)
+            .build()
+        prompt.authenticate(CancellationSignal(), mainExecutor, object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                if (!isDestroyed) onOk()
+            }
+
+            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                if (isDestroyed) return
+                status.text = "본인 확인이 취소돼 보내지 않았어요"
+                onFail()
+            }
+        })
     }
 
     private fun submit(d: DecisionDetail, answers: JSONObject, status: android.widget.TextView, reenable: () -> Unit) {

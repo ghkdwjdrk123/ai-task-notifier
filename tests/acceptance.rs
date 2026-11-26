@@ -1174,3 +1174,24 @@ async fn usage_error_is_reported_until_cleared() {
     assert!(ok.version > snap.version);
     assert!(ok.providers.iter().all(|p| p.usage_error.is_none() && p.usage_error_since.is_none()));
 }
+
+#[tokio::test]
+async fn answers_from_revoked_device_are_not_delivered() {
+    let h = harness().await;
+    let (dev, _token) = h.device("잃어버린 폰").await;
+    h.start(CLAUDE, "s1").await;
+    let id = h.decide("s1", "r1", vec![q(QD, &["가", "나"])], None).await;
+    let v = version_of(&h, &id).await;
+    h.svc
+        .submit(Some(&dev), &id, &submit_req("sub-revoked-1", v, answers(&[(QD, "가")])))
+        .await
+        .unwrap();
+    // 전달 전에 맥에서 기기 해제
+    h.svc.revoke_device(&dev).await.unwrap();
+    h.svc.deliver_pending().await.unwrap();
+    assert!(h.provider.delivered().is_empty(), "해제된 기기의 답은 원본에 넣지 않음");
+    let d = h.svc.decision_detail(&id).await.unwrap();
+    assert!(d.answerable, "결정은 다시 열림");
+    let s = d.latest_submission.unwrap();
+    assert_eq!((s.state, s.detail.as_deref()), (SubmissionState::Cancelled, Some("device_revoked")));
+}

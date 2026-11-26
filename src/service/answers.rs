@@ -286,6 +286,28 @@ impl Service {
             tx.commit().await?;
             return Ok(false);
         }
+        // 보낸 기기가 그 사이 등록 해제됐으면(분실·도난) 전달하지 않고 결정을 다시 연다
+        let revoked: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM submissions s JOIN devices v ON v.id = s.device_id \
+             WHERE s.id = ? AND v.revoked_at IS NOT NULL)",
+        )
+        .bind(submission_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if revoked {
+            set_submission(
+                &mut tx,
+                submission_id,
+                SubmissionState::Cancelled,
+                Some("device_revoked"),
+                now,
+            )
+            .await?;
+            set_decision_state(&mut tx, &d.id, DecisionState::Open, None, now).await?;
+            bump_version(&mut tx).await?;
+            tx.commit().await?;
+            return Ok(false);
+        }
         let provider = self.providers.get(&d.provider).cloned();
         if provider.is_none() {
             // 직접 응답 경로가 없는 제공자: 미반영으로 되돌려 사용자가 공식 경로로 답하게 한다
