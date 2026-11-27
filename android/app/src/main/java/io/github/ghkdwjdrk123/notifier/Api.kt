@@ -115,12 +115,12 @@ class Api(private val baseUrl: String, private val token: String?) {
         }
     }
 
-    /** 지시 대기 세션 '확인함': 지시 대기 수에서 뺀다(다음 턴을 마치면 다시 지시 대기). */
     /** 맥이 Claude 사용량을 바로 다시 읽게 한다. 결과는 실시간 스트림으로 온다. */
     fun refreshUsage() {
         send("/v1/usage/refresh", "POST", null)
     }
 
+    /** 지시 대기 세션 '확인함': 지시 대기 수에서 뺀다(다음 턴을 마치면 다시 지시 대기). */
     fun ackSession(id: String) {
         send("/v1/sessions/${enc(id)}/ack", "POST", null)
     }
