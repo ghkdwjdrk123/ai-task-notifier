@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.ghkdwjdrk123.notifier"
         minSdk = 31
         targetSdk = 36
-        versionCode = 13
-        versionName = "0.3.0"
+        versionCode = 14
+        versionName = "0.3.1"
     }
 
     // 정식 서명: 키 경로·비밀번호는 환경 변수로만 받는다(저장소에 두지 않음).

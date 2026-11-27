@@ -26,6 +26,7 @@ fn app(h: &H) -> Router {
         }),
         wake: Arc::new(Notify::new()),
         streams: Default::default(),
+        usage_refresh: None,
     })
 }
 
@@ -614,6 +615,7 @@ async fn app_update_is_served_to_paired_devices_only() {
             }),
             wake: Arc::new(Notify::new()),
             streams: Default::default(),
+            usage_refresh: None,
         })
     };
     let app = with_dir(Some(dir.path().to_path_buf()));
@@ -699,4 +701,42 @@ async fn foreign_host_is_rejected_and_streams_are_capped() {
     drop(open.pop());
     let res = app.clone().oneshot(get("127.0.0.1:8770", "/v1/stream")).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn usage_refresh_wakes_the_collector() {
+    let h = harness().await;
+    let n = Arc::new(Notify::new());
+    let app = api::router(AppState {
+        svc: h.svc.clone(),
+        cfg: Arc::new(ApiConfig {
+            allowed_origins: vec![ORIGIN.into()],
+            secure_cookie: true,
+            ..ApiConfig::default()
+        }),
+        wake: Arc::new(Notify::new()),
+        streams: Default::default(),
+        usage_refresh: Some(n.clone()),
+    });
+    let token = paired(&h, &app).await;
+    let (st, _, _) = call(&app, "POST", "/v1/usage/refresh", None, None, None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/usage/refresh")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::ACCEPTED);
+    // 수집기가 깨어난다
+    tokio::time::timeout(std::time::Duration::from_secs(1), n.notified())
+        .await
+        .expect("수집기를 깨워야 합니다");
+    // 수집기가 없으면 404
+    let (st, _, v) = call(&app_without_usage(&h), "POST", "/v1/usage/refresh", Some(&token), Some(ORIGIN), None).await;
+    assert_eq!((st, v["error"].as_str()), (StatusCode::NOT_FOUND, Some("no_usage_collector")));
+}
+
+fn app_without_usage(h: &H) -> Router {
+    app(h)
 }

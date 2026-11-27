@@ -104,6 +104,8 @@ pub struct AppState {
     pub wake: Arc<Notify>,
     /// 기기별 열린 실시간 스트림 수.
     pub streams: StreamCounts,
+    /// Claude 사용량 즉시 다시 읽기(수집기가 없으면 None).
+    pub usage_refresh: Option<Arc<Notify>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -116,6 +118,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/decisions/{id}/answers", post(submit_answer))
         .route("/v1/decisions/{id}/answers/{sid}", get(get_submission))
         .route("/v1/sessions/{id}/ack", post(ack_session))
+        .route("/v1/usage/refresh", post(refresh_usage))
         .route("/v1/device", delete(revoke_self))
         .route("/v1/app/latest", get(app_latest))
         .route("/v1/app/apk", get(app_apk))
@@ -431,6 +434,20 @@ async fn get_submission(
     Path((id, sid)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
     Ok(Json(st.svc.get_submission(&id, &sid).await?).into_response())
+}
+
+/// 폰의 '사용량 새로고침': Claude 사용량을 바로 다시 읽게 한다(결과는 실시간 스트림으로).
+/// 수집기는 직전 읽기에서 20초가 지나지 않았으면 그때까지 미룬다.
+async fn refresh_usage(State(st): State<AppState>, _d: AuthDevice) -> Result<StatusCode, ApiError> {
+    let Some(n) = &st.usage_refresh else {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "no_usage_collector",
+            "맥에서 Claude 사용량 수집이 꺼져 있습니다",
+        ));
+    };
+    n.notify_one();
+    Ok(StatusCode::ACCEPTED)
 }
 
 /// 지시 대기 세션 '확인함'(지시 대기 수에서 뺌).

@@ -161,6 +161,7 @@ echo '{"provider":"demo","session_id":"m1","event_id":"e1","type":"turn_started"
 | `POST /v1/decisions/{id}/answers` | `{submission_id, decision_version, answers}` → 202(접수) 또는 200(같은 제출 재전송) |
 | `GET /v1/decisions/{id}/answers/{submission_id}` | 제출 상태 |
 | `GET /v1/stream` | 실시간 스냅샷(SSE). 버전이 바뀌면 즉시, 아니어도 30초마다. 기기당 4개까지(넘으면 429) |
+| `POST /v1/usage/refresh` | Claude 사용량을 바로 다시 읽기(202, 직전 읽기에서 20초 뒤까지 미룸, 결과는 스트림으로). 수집기가 꺼져 있으면 404 |
 | `POST /v1/sessions/{id}/ack` | 지시 대기 세션 '확인함'(지시 대기 수에서 뺌, 다음 턴을 마치면 다시 지시 대기) |
 | `DELETE /v1/device` | 이 기기 등록 해제(토큰 무효) |
 | `GET /v1/app/latest` | 앱 업데이트 폴더의 최신 버전 `{version_code, version_name, size, sha256}`(없으면 404 `no_app`) |

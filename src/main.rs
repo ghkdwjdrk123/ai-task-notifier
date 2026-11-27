@@ -327,12 +327,17 @@ async fn serve(
     }
     let wake = Arc::new(Notify::new());
     let mut tasks = vec![tokio::spawn(run_worker(svc.clone(), wake.clone()))];
+    let usage_refresh = collectors.claude_usage.as_ref().map(|_| Arc::new(Notify::new()));
     if let Some(cu) = collectors.claude_usage {
         tracing::info!(
             "Claude 사용량 수집: 5분마다 /usage(설정 폴더 {})",
             cu.config_dir.display()
         );
-        tasks.push(tokio::spawn(run_claude_usage(svc.clone(), cu)));
+        tasks.push(tokio::spawn(run_claude_usage(
+            svc.clone(),
+            cu,
+            usage_refresh.clone().expect("수집기와 함께 만듦"),
+        )));
     }
     if let Some(home) = collectors.codex_home {
         tracing::info!("Codex 기록 감시: {}", home.join("sessions").display());
@@ -345,6 +350,7 @@ async fn serve(
         cfg: Arc::new(cfg),
         wake,
         streams: Default::default(),
+        usage_refresh,
     });
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -375,8 +381,9 @@ async fn serve(
 }
 
 /// Claude 사용량: 시작 직후 한 번, 이후 5분마다.
-async fn run_claude_usage(svc: Arc<Service>, cu: ClaudeUsage) {
+async fn run_claude_usage(svc: Arc<Service>, cu: ClaudeUsage, refresh: Arc<Notify>) {
     loop {
+        let started = tokio::time::Instant::now();
         match collect::read_claude_usage(&cu.bin, &cu.config_dir, &cu.work_dir).await {
             Ok(windows) => {
                 let ev = ProviderEvent {
@@ -399,7 +406,13 @@ async fn run_claude_usage(svc: Arc<Service>, cu: ClaudeUsage) {
                 }
             }
         }
-        tokio::time::sleep(Duration::from_secs(300)).await;
+        // 5분마다, 또는 폰의 '새로고침'으로 바로(직전 읽기에서 20초는 지난 뒤)
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(300)) => {}
+            _ = refresh.notified() => {
+                tokio::time::sleep_until(started + Duration::from_secs(20)).await;
+            }
+        }
     }
 }
 

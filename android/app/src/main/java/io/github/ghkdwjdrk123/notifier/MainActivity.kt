@@ -258,6 +258,9 @@ class MainActivity : Activity() {
                 col.addView(card)
             }
 
+            // 초기화 직후처럼 바로 보고 싶을 때(맥이 5분마다 읽는 것을 기다리지 않고)
+            col.addView(Ui.button(this, "사용량 새로고침") { refreshUsage() })
+
             // 세션
             col.addView(Ui.heading(this, "활성 세션"))
             if (snap.sessions.isEmpty()) col.addView(Ui.text(this, "활성 세션 없음", muted = true))
@@ -327,6 +330,21 @@ class MainActivity : Activity() {
     }
 
     /** 지시 대기 세션을 '확인함'으로. 결과는 실시간 스트림으로 화면에 돌아온다. */
+    private fun refreshUsage() {
+        val api = Api(prefs.serverUrl, prefs.token)
+        Thread {
+            val r = runCatching { api.refreshUsage() }
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                val msg = r.fold(
+                    { "맥에서 Claude 사용량을 다시 읽고 있어요(10~30초). ChatGPT는 Codex를 쓸 때 갱신돼요" },
+                    { "새로고침 요청 실패: ${it.message}" },
+                )
+                android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_LONG).show()
+            }
+        }.start()
+    }
+
     private fun ackSessions(ids: List<String>) {
         val api = Api(prefs.serverUrl, prefs.token)
         Thread {
